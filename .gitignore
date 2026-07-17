@@ -1,0 +1,17 @@
+# outputs
+out/
+
+# notes
+notes/
+
+# logs
+logs/
+*.log
+
+# temporary files
+*.tmp
+
+# Claude 
+.claude/
+# OPTIONAL: Remove '#' to ignore CLAUDE.md in the repository
+# CLAUDE.md
