@@ -26,12 +26,28 @@ Consequences:
 - Claude Code's existing test-verify loop works unchanged.
 - Checks are durable artifacts — they become regression tests for free.
 
+## Portability constraint (not a non-goal)
+
+**Cameron moves to a Mac in ~2 weeks** (confirmed 2026-07-20). macOS *validation* stays in
+[[Repos/Cyclaudes/planning/PHASE_5|PHASE_5]], but **portability is a Phase 1 constraint** — if this
+bakes in Windows assumptions, it stops working exactly when he needs it most.
+
+Concretely, in this phase:
+- **Never hardcode state vocabulary.** `checked`/`pressed` are UIA-specific; AX differs. Compare
+  states as opaque strings discovered from the tree, and always report actual states on failure.
+- **Never hardcode role names** or assume UIA's fixed control-type enum — the AX tree is untyped
+  by comparison.
+- **No `uia`-prefixed ID parsing.** IDs are opaque handles; treat them as such.
+- Permission failure must be a distinct, clearly-named **abstention** — on macOS a missing TCC
+  Accessibility grant yields an empty tree, which must never read as "nothing is broken."
+
 ## Non-goals for Phase 1
 
 Called out so they don't creep in:
-- Auto-trigger (hooks / skill firing on its own) — Phase 2, once verification is trustworthy.
-- Vision fallback — Phase 3. Structural only for now.
-- macOS / Linux backends — Windows-first. Touchpoint already abstracts this when we want it.
+- Auto-trigger (hooks / skill firing on its own) — Phase 3, once verification is trustworthy.
+- Vision fallback — Phase 4. Structural only for now.
+- macOS *validation and permissions work* — Phase 5. Portability discipline applies now; running
+  and proving it on a Mac does not.
 - App lifecycle orchestration (launch, navigate to state-under-test) — acknowledged as the
   biggest under-scoped piece; deferred to Phase 2 with a manual precondition for now.
 

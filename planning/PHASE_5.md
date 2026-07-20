@@ -5,14 +5,17 @@ up: "[[Repos/Cyclaudes/planning/PLAN_MAIN|PLAN_MAIN]]"
 ---
 # Phase 5 - Cross-platform (macOS)
 
-**Status: speculative — confirm the need before building.**
+**Status: confirmed and time-boxed.** Cameron moves to a Mac in **~2 weeks** (confirmed
+2026-07-20, i.e. around 2026-08-03). This is no longer speculative.
 
-Cameron develops on Windows 11. macOS support was raised as "if possible," not as a requirement.
-If he isn't actually developing on a Mac, this phase is YAGNI and should stay unbuilt; the cost is
-not the initial port but the permanent doubling of the platform surface every later phase must
-support.
+**This changes the plan's shape, not just its priority.** If the tool is Windows-only when he
+switches machines, it stops working exactly when he needs it. So portability splits in two:
+- **Portability discipline is a Phase 1 constraint** — no hardcoded state vocabulary, role names,
+  or ID formats. Applied now, from the first line of code.
+- **macOS validation and permissions work is this phase** — running it on real hardware.
 
-**Do not start this phase without confirming a real macOS use case.**
+Aim to have Phases 1–2 portable-by-construction before the switch, so this phase is a validation
+pass rather than a port.
 
 ## Why it's cheap if the need is real
 
@@ -48,8 +51,8 @@ holds, since window/process association differs.
 
 ## Open questions
 
-- **Does Cameron actually develop UI work on macOS?** If no, close this phase unbuilt.
-- Linux/AT-SPI2 is available via the same abstraction but has no stated use case at all.
+- Which Mac / OS version, and is the target app the same one as on Windows?
+- Linux/AT-SPI2 is available via the same abstraction but has no stated use case at all — leave it.
 
 ## Related
 

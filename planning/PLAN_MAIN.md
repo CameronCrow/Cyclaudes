@@ -73,7 +73,7 @@ Sequential — each phase depends on the one before. Parallelism lives *within* 
 | 2 | **Driving the app** | Lifecycle + PID-scoped isolation, so checks are self-sufficient and can't touch Cameron's real session. |
 | 3 | **The autonomous trigger** | The phase that actually removes Cameron. Last of the core three by design. |
 | 4 | **Vision fallback** | Only what the tree cannot encode — occlusion, clipping, blank renders. |
-| 5 | **Cross-platform (macOS)** | Speculative. Confirm a real need before building. |
+| 5 | **Cross-platform (macOS)** | Confirmed — Cameron switches to a Mac ~2026-08-03. |
 
 The ordering is deliberate: **the trigger comes last.** A trigger that fires unreliable
 verification is worse than no trigger — it converts a visible stall into an invisible false pass.

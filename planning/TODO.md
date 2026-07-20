@@ -68,10 +68,11 @@ Tightly coupled; best done by **one agent**, not fanned out.
 - [ ] Routing rule: when a check escalates from structural to vision
 - [ ] Success criterion: catches a defect structural passed; does not pass a broken layout
 
-## Phase 5 — Cross-platform (macOS) — **speculative, confirm need first**
+## Phase 5 — Cross-platform (macOS) — **confirmed, ~2026-08-03**
 
-- [ ] **Decide whether this is real.** If Cameron isn't developing UI work on macOS, close
-      unbuilt — the cost is permanently doubling the platform surface, not the port itself
+Portability *discipline* is enforced in Phase 1 (see its portability constraint). This phase is
+validation on real hardware.
+
 - [ ] TCC/Accessibility permission handling + clear diagnostic on missing grant
 - [ ] macOS state-vocabulary mapping
 - [ ] PID ownership equivalent on macOS → Phase 2
