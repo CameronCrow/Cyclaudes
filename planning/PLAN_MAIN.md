@@ -63,14 +63,34 @@ Stalling costs Cameron time; a bogus pass silently ships broken work and permane
 in the tool — after which he'd go back to checking manually anyway and we'd have built nothing.
 Honest abstention matters more than coverage.
 
+## Roadmap
+
+Sequential — each phase depends on the one before. Parallelism lives *within* a phase.
+
+| Phase | What | Why it's here |
+|---|---|---|
+| 1 | **The verification contract** | The hard part: acceptance criteria + honest abstention. UI checks are plain pytest tests. |
+| 2 | **Driving the app** | Lifecycle + PID-scoped isolation, so checks are self-sufficient and can't touch Cameron's real session. |
+| 3 | **The autonomous trigger** | The phase that actually removes Cameron. Last of the core three by design. |
+| 4 | **Vision fallback** | Only what the tree cannot encode — occlusion, clipping, blank renders. |
+| 5 | **Cross-platform (macOS)** | Speculative. Confirm a real need before building. |
+
+The ordering is deliberate: **the trigger comes last.** A trigger that fires unreliable
+verification is worse than no trigger — it converts a visible stall into an invisible false pass.
+Phases 1–2 exist to earn the right to fire automatically.
+
 ## Current State
 
-Scoped and planned; no code yet. Touchpoint installed (`touchpoint-py` 0.3.0) and registered as a
-project-local MCP server in no-vision mode.
+Scoped and fully planned through Phase 5; no code yet. Touchpoint installed (`touchpoint-py`
+0.3.0) and registered as a project-local MCP server in no-vision mode. Next: implement Phase 1.
 
 ## Related
 
 - [[Repos/Cyclaudes/planning/PHASE_1|PHASE_1]] — the verification contract
+- [[Repos/Cyclaudes/planning/PHASE_2|PHASE_2]] — driving the app
+- [[Repos/Cyclaudes/planning/PHASE_3|PHASE_3]] — the autonomous trigger
+- [[Repos/Cyclaudes/planning/PHASE_4|PHASE_4]] — vision fallback
+- [[Repos/Cyclaudes/planning/PHASE_5|PHASE_5]] — cross-platform (speculative)
 - [[Repos/Cyclaudes/planning/TODO|TODO]]
 - `related-work/accessibility-tree-agent-tooling.md` — prior-art sweep + smoke-test findings
 - `Ladder-Logic-Translator-LLT` — `src/llt/importer/driver.py` — the seed UIA implementation
