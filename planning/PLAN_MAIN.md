@@ -1,73 +1,78 @@
 ---
 type: reference
-tags: [repo/PROJECT_TEMPLATE]
-up: "[[PROJECT_TEMPLATE]]"
+tags: [repo/Cyclaudes]
+up: "[[Cyclaudes]]"
 ---
 # Planning
 
-**Status:** Unscoped brief, written for Fable to pick up (2026-07-17). Not a
-design — the first real task here is turning this into a `PHASE_1.md` with
-committed decisions, not writing code.
+**Status:** Scoped (2026-07-20). The four open questions are answered, prior art is swept, the
+closest existing tool is smoke-tested, and [[Repos/Cyclaudes/planning/PHASE_1|PHASE_1]] is written.
+Ready to implement.
 
 ## Problem
 
-Claude Code can modify a UI but can't cheaply *verify* one on its own today.
-The only two options are: ask Cameron to eyeball it, or take a screenshot and
-have a multi-modal pass visually inspect pixels — slow, imprecise, and
-expensive to run in a tight verification loop.
+Cameron develops mostly hands-off — the agent works autonomously. But the loop **stalls after
+every issue resolution**, because the agent finishes a change and then waits on Cameron to open
+the real app and confirm it worked. He is the blocking verifier, and that is the bottleneck.
 
-## Seed
+## Goal
 
-The `Ladder-Logic-Translator-LLT` repo already solved a narrow version of
-this: it drives Rockwell's Logix Designer via Windows UI Automation, through
-`pywinauto`'s `Desktop` backend (gated behind LLT's optional `[importer]`
-extra) — see `src/llt/importer/driver.py` and `tools/inspect_studio_uia.py` in
-that repo (local path: `C:\Users\ccrow\Projects\Ladder-Logic-Translator-LLT`).
-That gives *structural* access to a UI — the control tree, element
-properties, text values — instead of pixels.
+Take Cameron out of the verification path: the agent verifies its own work against the running
+application. This means expanding "verification" beyond pytest to be multi-modal — structural UI
+state, visual state, and interactive behaviour all become things the agent can assert on its own,
+the same way it already asserts on a passing test suite.
 
-## Vision (Cameron's framing)
+The unit of value is **unblocking the autonomous loop** — not "exposing accessibility-tree
+primitives to Claude." Primitives are a means. Judge every design choice by whether it lets the
+agent close the loop without Cameron.
 
-> Compile and make easily usable those kinds of tools for Claude, so it can
-> run/test UI and multi-modal applications itself, rather than being blocked
-> on manual verification or frame-capture-and-analyze approaches.
+## Decisions (settled 2026-07-20)
 
-Generalize LLT's app-specific UIA driver into a reusable toolkit any Claude
-Code session can reach for — not just for Logix Designer.
+1. **Delivery shape: a Claude Code plugin.** Not a bare MCP server — an MCP server only makes
+   tools *available*; nothing makes the agent reach for them at the right moment, so the loop
+   would still stall. The plugin's real job is carrying the *trigger*.
+2. **Multi-modal scope: structural first, vision as fallback** — for two cases, not one:
+   (a) surfaces with no accessibility tree (some web UIs, games), and (b) properties a tree
+   *cannot encode* even when present — layout, overlap, clipping, colour, "does this look
+   broken." A tree will happily report a button as enabled while it renders behind a modal.
+3. **Relationship to LLT: start fresh.** Borrow lessons from `src/llt/importer/driver.py`, but it
+   is app-specific and won't generalise. Do not disturb LLT before its ~Jul 24 deadline.
+4. **Trigger: after implementing**, when the result requires user interaction or is visual — a
+   targeted verification step, not a continuous side channel.
 
-## Open questions (the actual scope of this brief)
+## Build vs reuse
 
-- **Delivery shape.** A Claude Code plugin? An MCP server exposing UIA
-  primitives (find element, read property, click, read text) as tools? A
-  plain Python library other repos import? Cameron described it as "a Claude
-  plugin we custom build" — start there, but confirm what a Claude Code
-  plugin can actually expose (tool definitions, permissions) before
-  committing to that shape.
-- **Scope of "multi-modal."** Does this replace frame-capture/vision analysis
-  entirely, or keep it as a fallback where structural access isn't available
-  (web UIs, games, anything without a native accessibility tree)? Windows UIA
-  is Windows-only and desktop-only — decide early whether this is
-  Windows-first or needs a cross-platform story.
-- **Relationship to LLT.** Does LLT's driver get extracted/generalized into
-  this repo (LLT then depends on Cyclaudes), or does Cyclaudes start fresh and
-  only borrow the pattern? LLT is Cameron's active work project with a
-  near-term deadline (last Simplex day ~Jul 24) — don't disrupt it to
-  refactor prematurely.
-- **Verification-loop design.** How does a Claude session actually use this
-  mid-task — a tool it calls directly, a subprocess, a queried service? It
-  should tie into how Claude Code already verifies its own work (test
-  runners, build checks) rather than being a bolt-on side channel.
+**Reuse [Touchpoint](https://github.com/Touchpoint-Labs/touchpoint) as the driver layer; build the
+verification loop on top.** Smoke-tested against Notepad on Windows 11 (2026-07-20): the
+act→structurally-verify round-trip works with zero setup, and modal dialogs, element states, and
+text values are all readable without a vision model.
+
+The gap Cyclaudes fills is *not* the driver — it is the disciplined wrapper: re-assert after every
+action, never cache element IDs across mutations, resolve windows explicitly. Four concrete
+footguns justify that wrapper; see `related-work/accessibility-tree-agent-tooling.md` and
+[[cyclaudes-touchpoint-findings]].
+
+## The hard part
+
+Not tree-reading — **acceptance criteria**. What disappears when Cameron steps out of the loop is
+the thing he was silently supplying: *"yeah, that looks right."* So expected post-conditions must
+be declared *before/while* implementing, then asserted after. Test-first, but for UI state.
+
+**And the safety property:** a false-positive "verified" is worse than the stall it replaces.
+Stalling costs Cameron time; a bogus pass silently ships broken work and permanently burns trust
+in the tool — after which he'd go back to checking manually anyway and we'd have built nothing.
+Honest abstention matters more than coverage.
 
 ## Current State
 
-Just scaffolded (2026-07-17) from PROJECT_TEMPLATE. No code yet.
+Scoped and planned; no code yet. Touchpoint installed (`touchpoint-py` 0.3.0) and registered as a
+project-local MCP server in no-vision mode.
 
 ## Related
 
-- `Ladder-Logic-Translator-LLT` — `src/llt/importer/driver.py`,
-  `tools/inspect_studio_uia.py` — the seed UIA implementation.
-- `workforce` repo Projects registry — "Multi-modal Claude Verification"
-  entry (Mode: repo) points here.
-- [[Repos/PROJECT_TEMPLATE/planning/PHASE_1|PHASE_1]]
-- [[Repos/PROJECT_TEMPLATE/planning/TODO|TODO]]
-- [[PROJECT_TEMPLATE]]
+- [[Repos/Cyclaudes/planning/PHASE_1|PHASE_1]] — the verification contract
+- [[Repos/Cyclaudes/planning/TODO|TODO]]
+- `related-work/accessibility-tree-agent-tooling.md` — prior-art sweep + smoke-test findings
+- `Ladder-Logic-Translator-LLT` — `src/llt/importer/driver.py` — the seed UIA implementation
+- `workforce` repo Projects registry — "Multi-modal Claude Verification" entry points here
+- [[Cyclaudes]]
