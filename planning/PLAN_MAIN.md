@@ -79,10 +79,48 @@ The ordering is deliberate: **the trigger comes last.** A trigger that fires unr
 verification is worse than no trigger — it converts a visible stall into an invisible false pass.
 Phases 1–2 exist to earn the right to fire automatically.
 
-## Current State
+## Current State (2026-07-20 — end of session, resume here)
 
-Scoped and fully planned through Phase 5; no code yet. Touchpoint installed (`touchpoint-py`
-0.3.0) and registered as a project-local MCP server in no-vision mode. Next: implement Phase 1.
+**Phase 1 is roughly half built and `main` is green.** 54 tests pass under bare `python -m pytest`;
+CI runs the suite on every PR (`.github/workflows/tests.yml`, Windows-only for now).
+
+Landed:
+- `src/cyclaudes/ui.py` — discipline layer over touchpoint (#2, PR #9). Actions return `None`
+  unconditionally, name-only API, own window/element matching ladder that raises on ambiguity.
+- `src/cyclaudes/abstain.py` + `pytest_plugin.py` — `CannotVerify` with its own pytest outcome
+  and exit code 12 (#1, PR #10). Verified by hand: all-abstain → 12, pass+abstain → 12,
+  abstain+real-failure → 1.
+- `skills/verify-ui/SKILL.md` — the workflow doc (#4, PR #8).
+
+Still open: **#3** (fixtures), **#5** (first real-UI check), **#6** (prove a broken change fails),
+**#7** (prove abstention is never read as success). Dependency chain: #3 → #5 → {#6, #7}.
+
+### Next action
+
+Resume the second sweep at lvl 2 (`sonnet` Easy / `opus` Harder+Hardest). One agent should take
+**#3 and #5 together** — #5 is #3's first consumer, and building fixtures without a consumer means
+reworking them. Then #6 and #7 fan out in parallel.
+
+### Two unresolved live-UI findings — read before writing code
+
+An agent started #3/#5, hit these against a real UI, and was stopped for budget before claiming or
+committing anything. Its transcript was lost, so both are **leads to reproduce, not diagnoses**
+(full write-up in the comment on issue #5):
+
+1. **"Enum bug confirmed"** — no surviving detail. Could be touchpoint, our role/state handling, or
+   the seam between them. If it turns out to be enum-coupling, it is a *portability* defect, since
+   Phase 1 forbids depending on UIA's fixed control-type enum.
+2. **Snapshots taking ~30s** — potentially design-level rather than a bug. `ui.py` re-snapshots
+   after every action by design; at 30s per snapshot a ten-assertion check costs five minutes and
+   the Phase 3 autonomous loop is unusable. Test scope/depth/other-open-apps hypotheses first. If
+   snapshots are inherently slow, that is a Phase 1 design input (caching within an assertion,
+   scoped subtree reads, batching) and must be settled before Phase 2 builds on it.
+
+### Known gap
+
+`ui.py` defines `ABSTENTION_CONDITIONS = (EmptyTree, WindowGone)` and `abstain.py` defines
+`CannotVerify`, but **nothing connects them** — an empty tree currently surfaces as a failure
+rather than an abstention. Fails safe, so not urgent; belongs in #3's fixture work.
 
 ## Related
 
