@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    # Windows-only for now: ui.py imports touchpoint at module level, and
+    # touchpoint's Windows backend needs no system packages (built-in COM),
+    # while its Linux backend needs AT-SPI system deps. macOS joins in Phase 5.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      # Editable install is load-bearing, not a convenience: the abstention
+      # outcome registers via the pytest11 entry point in pyproject.toml.
+      # Installing any other way silently drops it and abstentions stop
+      # being distinguishable from failures.
+      - run: python -m pip install -e ".[dev]"
+
+      # Bare pytest, no -p no: escape hatch. A broken plugin entry point
+      # breaks startup, and that must fail CI rather than be worked around —
+      # unattended runs (Phase 3) have no one to pass a flag.
+      - run: python -m pytest
