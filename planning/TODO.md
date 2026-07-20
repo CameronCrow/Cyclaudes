@@ -25,7 +25,7 @@ Tightly coupled; best done by **one agent**, not fanned out.
 - [ ] `src/cyclaudes/ui.py` — discipline layer over touchpoint: name-only API (no raw IDs
       exposed), actions re-snapshot instead of trusting their return, explicit window resolution
       that raises on ambiguity, failure messages that print actual states
-- [ ] `CannotVerify` + `pytest_runtest_makereport` hook giving abstention its own outcome,
+- [x] `CannotVerify` + `pytest_runtest_makereport` hook giving abstention its own outcome,
       visually distinct from both pass and fail → *depends on nothing; can start immediately*
 - [ ] `conftest.py` fixtures exposing the discipline layer to checks → `ui.py`
 - [ ] `verify-ui` skill — declare post-conditions before implementing; abstain rather than guess
