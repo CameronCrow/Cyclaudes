@@ -22,7 +22,7 @@ Phases are **sequential**; parallelism lives *within* a phase, not across phases
 
 Tightly coupled; best done by **one agent**, not fanned out.
 
-- [ ] `src/cyclaudes/ui.py` — discipline layer over touchpoint: name-only API (no raw IDs
+- [x] `src/cyclaudes/ui.py` — discipline layer over touchpoint: name-only API (no raw IDs
       exposed), actions re-snapshot instead of trusting their return, explicit window resolution
       that raises on ambiguity, failure messages that print actual states
 - [ ] `CannotVerify` + `pytest_runtest_makereport` hook giving abstention its own outcome,

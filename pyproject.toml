@@ -17,3 +17,4 @@ packages = ["src/cyclaudes"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
