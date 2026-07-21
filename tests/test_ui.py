@@ -651,3 +651,121 @@ class TestOwnedLiveness:
         assert notepad.windows_calls == 0, (
             "a blocked-close diagnosis must not walk every top-level window (#11)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Precondition helpers (Phase 2D, issue #14): the reusable building blocks
+# fixtures compose from. assert_owned fails LOUDLY; wait_until_ready ABSTAINS.
+# ---------------------------------------------------------------------------
+
+
+class TestAssertOwned:
+    def test_passes_on_owned_raises_on_unowned_for_a_handle(self, notepad):
+        # notepad fixture uses pid 4242.
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        assert ui.assert_owned(win) == 4242  # owned handle -> passes, returns pid
+
+        ui.disown(4242)
+        with pytest.raises(ui.UnownedWindow) as exc:
+            ui.assert_owned(win)
+        assert "4242" in str(exc.value)  # names the offending pid
+
+    def test_accepts_a_raw_pid_too(self, fake):
+        fake.wins = [FakeWindow(id="w:1", title="X", app="App", pid=55)]
+        ui.own(55)
+        assert ui.assert_owned(55) == 55
+        with pytest.raises(ui.UnownedWindow):
+            ui.assert_owned(999)  # never owned
+
+    def test_failure_is_loud_never_an_abstention_or_assertion(self):
+        # THE point of assert_owned: "not ours to touch" must fail loudly. The
+        # raised instance must not be swallowable as an abstention, nor by a
+        # broad `except AssertionError`.
+        with pytest.raises(ui.UnownedWindow) as exc:
+            ui.assert_owned(12345)  # nothing owned
+        assert type(exc.value) not in ui.ABSTENTION_CONDITIONS
+        assert not isinstance(exc.value, AssertionError)
+
+
+class TestWaitUntilReady:
+    def test_returns_handle_when_already_interactive(self, notepad):
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        assert ui.wait_until_ready(win) is win  # ready now -> returns immediately
+
+    def test_blocks_then_returns_once_the_tree_fills(self, notepad):
+        # The core promise: block while the window is not yet interactive, then
+        # succeed once it renders — without failing in the meantime.
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", timeout=1.0, poll=0.01)
+        real_tree = notepad.trees["w:1"]
+        notepad.trees["w:1"] = []  # not interactive yet
+        orig_elements = notepad.elements
+        calls = {"n": 0}
+
+        def delayed(window_id=None, **kwargs):
+            calls["n"] += 1
+            if calls["n"] >= 3 and window_id == "w:1":
+                notepad.trees["w:1"] = real_tree  # becomes interactive mid-wait
+            return orig_elements(window_id=window_id, **kwargs)
+
+        notepad.elements = delayed
+        assert ui.wait_until_ready(win) is win
+        assert calls["n"] >= 3  # it actually had to wait, not pass on the first look
+
+    def test_abstains_when_tree_stays_empty(self, fake):
+        # Never-ready must be "cannot verify" (EmptyTree), not a fail.
+        fake.wins = [FakeWindow(id="w:1", title="X", app="App", pid=77)]
+        fake.trees["w:1"] = []
+        ui.own(77)
+        win = ui.owned_window(app="App", **FAST)
+        with pytest.raises(ui.EmptyTree) as exc:
+            ui.wait_until_ready(win)
+        # abstention, not an assertion failure
+        assert type(exc.value) in ui.ABSTENTION_CONDITIONS
+        assert not isinstance(exc.value, AssertionError)
+
+    def test_abstains_when_the_window_vanishes(self, notepad):
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        notepad.wins = []  # closed before it ever became ready
+        with pytest.raises(ui.WindowGone) as exc:
+            ui.wait_until_ready(win)
+        assert type(exc.value) in ui.ABSTENTION_CONDITIONS
+
+    def test_disowned_handle_raises_unowned_not_abstention(self, notepad):
+        # The ownership re-check must win: a lapsed claim is a hard safety
+        # error that propagates immediately, never retried or abstained.
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        ui.disown(4242)
+        with pytest.raises(ui.UnownedWindow) as exc:
+            ui.wait_until_ready(win)
+        assert type(exc.value) not in ui.ABSTENTION_CONDITIONS
+
+
+class TestResetToKnownState:
+    def test_runs_reset_then_returns_a_ready_handle(self, notepad):
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        win.set_value("Text editor", "leftover from a prior check", replace=True)
+
+        def clear(w):
+            w.set_value("Text editor", "", replace=True)
+
+        result = ui.reset_to_known_state(win, clear)
+        assert result is win
+        assert win.read_text("Text editor") == ""  # prior check's residue is gone
+
+    def test_abstains_if_the_window_is_not_ready_after_reset(self, notepad):
+        # Inherits wait_until_ready's abstention: a reset that leaves the
+        # window unready is "cannot verify", not a fail.
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+
+        def wipe(w):
+            notepad.trees["w:1"] = []  # reset left nothing interactive
+
+        with pytest.raises(ui.EmptyTree):
+            ui.reset_to_known_state(win, wipe)

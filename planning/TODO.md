@@ -57,7 +57,12 @@ Tightly coupled; best done by **one agent**, not fanned out.
 - [ ] Teardown that survives blocking modals (dismiss non-destructively; force-kill last resort)
       and runs even when the check fails → `app_session`
 - [ ] Scratch workspace/profile isolation — runs cannot mutate real user data
-- [ ] Precondition helpers: `wait_until_ready`, `assert_owned`, `reset_to_known_state`
+- [x] Precondition helpers: `wait_until_ready`, `assert_owned`, `reset_to_known_state`
+      (`ui.py`: `assert_owned` — hard `UnownedWindow` guard built on `is_owned`, never an
+      abstention; `wait_until_ready` — blocks until the owned tree is non-empty else abstains
+      `EmptyTree`/`WindowGone`, re-checks ownership; `reset_to_known_state` — minimal
+      run-reset-then-`wait_until_ready` convention. `tests/test_ui.py::TestAssertOwned`/
+      `TestWaitUntilReady`/`TestResetToKnownState`)
 - [ ] Success criterion: full suite runs alongside Cameron's open apps, provably touching none
       (assert on PID ownership, not absence of visible damage)
 

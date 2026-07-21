@@ -91,6 +91,7 @@ __all__ = [
     "WindowGone",
     "WindowHandle",
     "WindowNotFound",
+    "assert_owned",
     "disown",
     "is_owned",
     "own",
@@ -99,6 +100,8 @@ __all__ = [
     "owned_windows",
     "owning",
     "reset_ownership",
+    "reset_to_known_state",
+    "wait_until_ready",
     "window",
 ]
 
@@ -946,3 +949,138 @@ class WindowHandle:
             )
 
         self._settle(check, on_fail, timeout)
+
+
+# ---------------------------------------------------------------------------
+# Precondition helpers (Phase 2D, issue #14)
+# ---------------------------------------------------------------------------
+#
+# Small, boring building blocks that fixtures compose from. Each one is
+# careful about *which side of the trust boundary a failure lands on*:
+#
+# - ``assert_owned`` is a **safety error**. "That isn't ours to touch" must
+#   fail loudly (:class:`UnownedWindow`, a :class:`UIError`), never abstain and
+#   never masquerade as an ordinary assertion failure — exactly the discipline
+#   #12 established for the ownership-scoped surface.
+# - ``wait_until_ready`` **abstains**. A window that never becomes interactive
+#   means "could not verify", not "verified broken", so it re-raises the
+#   standing abstention condition (:class:`EmptyTree` / :class:`WindowGone`)
+#   rather than failing as an assertion.
+#
+# Both stay portable: ownership is pure PID-set membership and "ready" is the
+# vocabulary-free "the tree has something in it", so no state/role strings are
+# hardcoded (macOS AX and Windows UIA differ) — see the module portability rules.
+
+
+def assert_owned(handle_or_pid) -> int:
+    """Hard-assert the target belongs to a PID this layer launched.
+
+    Accepts either a :class:`WindowHandle` (or any object exposing ``.pid``,
+    e.g. an :class:`OwnedWindow`) or a raw integer PID, and is built directly
+    on :func:`is_owned`, so it is pure PID-set membership — no titles, roles,
+    or platform state — and carries over unchanged to macOS PID semantics.
+
+    This is the reusable guard behind Phase-2 success criterion 4 ("attempting
+    to act on an unowned window **raises**"). A fixture calls it right before
+    handing a window to a check, or a check calls it before acting.
+
+    On an unowned target it raises :class:`UnownedWindow` — deliberately the
+    *same* loud failure mode as the ownership-scoped surface: a
+    :class:`UIError`, **not** in :data:`ABSTENTION_CONDITIONS` and **not** an
+    :class:`AssertionError` subclass. "That isn't ours to touch" must fail
+    loudly, never be swallowed by a broad ``except AssertionError`` nor read as
+    "nothing to verify". Returns the resolved PID for convenient inline use.
+
+    Raises:
+        UnownedWindow: the target's PID is not in the owned set.
+    """
+    pid = getattr(handle_or_pid, "pid", None)
+    if pid is None:
+        pid = int(handle_or_pid)
+    if not is_owned(pid):
+        raise UnownedWindow(
+            f"assert_owned: pid {pid} is not owned "
+            f"(owned={sorted(_owned_pids)}); refusing to treat a window this "
+            f"layer did not launch as ours. own() its PID first if it really "
+            f"is a process we launched. This is a safety error, not an "
+            f"abstention — it must fail loudly."
+        )
+    return pid
+
+
+def wait_until_ready(
+    handle: "WindowHandle",
+    *,
+    timeout: float | None = None,
+    poll: float | None = None,
+) -> "WindowHandle":
+    """Block until *handle*'s window is present and interactive, else **abstain**.
+
+    "Ready" is defined portably, with no state/role vocabulary: the window
+    still exists and its accessibility tree is *non-empty* — i.e. the app has
+    rendered something to read or act on. (On macOS, an owned window whose tree
+    is still empty is not "ready" either.)
+
+    This never fails-as-assertion. A window that never becomes ready is "could
+    not verify", not "verified broken", so at the deadline it re-raises the
+    standing abstention condition — :class:`EmptyTree` (nothing in the tree yet,
+    or accessibility access denied) or :class:`WindowGone` (the window vanished
+    before it settled). Both are in :data:`ABSTENTION_CONDITIONS`, so the
+    pytest layer surfaces them as "cannot verify".
+
+    Ownership is re-checked on every poll: the settle uses the handle's own
+    fresh read, so a handle whose PID was disowned raises :class:`UnownedWindow`
+    — a hard safety error that is *not* caught here (it is not an abstention),
+    so it propagates immediately rather than being retried or swallowed.
+
+    ``timeout`` / ``poll`` default to the handle's own configured settle
+    window. Returns the same handle on success, so it chains::
+
+        win = ui.wait_until_ready(ui.owned_window(app="Notepad"))
+
+    Raises:
+        EmptyTree | WindowGone: the window never became ready (abstention).
+        UnownedWindow: the handle's PID is no longer owned (safety error).
+    """
+    timeout = handle._timeout if timeout is None else timeout
+    poll = handle._poll if poll is None else poll
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            # A non-empty scoped read is the readiness signal; _snapshot()
+            # raises EmptyTree/WindowGone when not ready and UnownedWindow
+            # (which we deliberately do NOT catch) when the claim has lapsed.
+            handle._snapshot()
+            return handle
+        except ABSTENTION_CONDITIONS:
+            if time.monotonic() >= deadline:
+                raise  # still not ready at the deadline -> abstain, never fail
+            time.sleep(poll)
+
+
+def reset_to_known_state(
+    handle: "WindowHandle",
+    reset,
+    *,
+    timeout: float | None = None,
+    poll: float | None = None,
+) -> "WindowHandle":
+    """Run an app-specific *reset*, returning the handle once it is ready again.
+
+    A **convention, not a framework**. Navigation and clearing are inherently
+    app-specific (Phase 2 keeps navigation in per-check code), so the reset
+    step itself is the caller's callable, invoked as ``reset(handle)``. This
+    wrapper only supplies the surrounding discipline — run the reset, then
+    block until the window is interactive again — so one check's leftovers
+    cannot bleed into the next.
+
+    Ownership needs no separate gate here: any action *reset* performs goes
+    through the handle, which re-checks ownership on every call, and the
+    trailing :func:`wait_until_ready` re-checks it once more. Readiness after
+    reset therefore abstains (never fails-as-assertion) if the window does not
+    settle, and raises :class:`UnownedWindow` if the claim has lapsed.
+
+    Returns the handle, so a fixture can ``return reset_to_known_state(win, ...)``.
+    """
+    reset(handle)
+    return wait_until_ready(handle, timeout=timeout, poll=poll)
