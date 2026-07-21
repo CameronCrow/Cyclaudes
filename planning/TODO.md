@@ -40,8 +40,9 @@ Tightly coupled; best done by **one agent**, not fanned out.
 - [x] Success criterion 2: deliberately broken change → check fails (no false pass)
       (`tests/test_success_criterion_2.py`: 5 broken cases incl. the OK-but-
       silently-failed close, each → pytest fail/exit 1, never abstention)
-- [ ] Success criterion 3: deliberately unverifiable assertion → abstains, and is **not** reported
-      as success
+- [x] Success criterion 3: deliberately unverifiable assertion → abstains, and is **not** reported
+      as success (`tests/test_success_criterion_3.py`: empty-tree/TCC, absent
+      element, uninterpretable state → abstain/exit 12, all-abstain ≠ verified)
 
 ## Phase 2 — Driving the app → Phase 1
 
