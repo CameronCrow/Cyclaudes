@@ -37,7 +37,9 @@ Tightly coupled; best done by **one agent**, not fanned out.
       (`tests/test_notepad_live.py`, marked `live`; ran green 3x — round-trip,
       opaque states, right-window-among-several, modal-on-close asserted
       structurally, clean dismissal)
-- [ ] Success criterion 2: deliberately broken change → check fails (no false pass)
+- [x] Success criterion 2: deliberately broken change → check fails (no false pass)
+      (`tests/test_success_criterion_2.py`: 5 broken cases incl. the OK-but-
+      silently-failed close, each → pytest fail/exit 1, never abstention)
 - [ ] Success criterion 3: deliberately unverifiable assertion → abstains, and is **not** reported
       as success
 
