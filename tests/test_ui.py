@@ -350,6 +350,32 @@ class TestStates:
         # a wrong role is simply no match, not an enum error
         assert not win.exists("Save", role="AXNonsense")
 
+    def test_enum_valued_roles_and_states_compare_by_value_not_repr(self, fake):
+        # The live bug (issue #5): touchpoint returns roles/states as Enum
+        # members, and str(State.CHECKED) is "State.CHECKED", not "checked".
+        # The layer must compare against .value, or every real-driver state
+        # and unified-role assertion silently never matches. The existing
+        # fakes use plain strings, so this uses real enum members on purpose.
+        import touchpoint as tp
+
+        fake.wins = [FakeWindow(id="w:1", title="X", app="App", pid=1)]
+        fake.trees["w:1"] = [
+            {
+                "name": "Bold",
+                "role": tp.Role.BUTTON,
+                "raw_role": "button",
+                "states": [tp.State.CHECKED, tp.State.ENABLED],
+            }
+        ]
+        win = ui.window(app="App", **FAST)
+        # states surface as their portable .value, not "State.CHECKED"
+        assert win.states("Bold") == ("checked", "enabled")
+        win.assert_state("Bold", "checked")
+        win.assert_not_state("Bold", "State.CHECKED")
+        # the unified role's .value matches, not its repr
+        assert win.exists("Bold", role=tp.Role.BUTTON.value)
+        assert not win.exists("Bold", role="Role.BUTTON")
+
 
 # ---------------------------------------------------------------------------
 # Element resolution: raise rather than guess

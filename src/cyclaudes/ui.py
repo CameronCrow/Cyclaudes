@@ -141,9 +141,23 @@ ABSTENTION_CONDITIONS: tuple[type[UIError], ...] = (EmptyTree, WindowGone)
 # ---------------------------------------------------------------------------
 
 
+def _val(x) -> str:
+    """Canonical string for a role or state token.
+
+    Touchpoint reports roles and states as ``enum.Enum`` members whose
+    ``.value`` holds the portable vocabulary string (``State.CHECKED.value
+    == "checked"``). Plain ``str(member)`` yields ``"State.CHECKED"`` — the
+    wrong string, which silently breaks every state/role comparison against
+    the real driver (the tests use plain-string fakes, so they never caught
+    it). ``.value`` is also the *portable* choice: macOS AX reports these as
+    plain strings, and ``getattr(x, "value", x)`` returns them unchanged.
+    """
+    return str(getattr(x, "value", x))
+
+
 def _states_of(el) -> tuple[str, ...]:
     """The element's states as opaque strings, exactly as the tree reports them."""
-    return tuple(str(s) for s in getattr(el, "states", ()) or ())
+    return tuple(_val(s) for s in getattr(el, "states", ()) or ())
 
 
 def _describe_window(w) -> str:
@@ -152,14 +166,14 @@ def _describe_window(w) -> str:
 
 def _describe_element(el) -> str:
     states = ", ".join(_states_of(el))
-    role = str(getattr(el, "role", "") or "")
+    role = _val(getattr(el, "role", "") or "")
     return f"{el.name!r} (role={role}, states=[{states}])"
 
 
 def _role_matches(el, role: str) -> bool:
     """Opaque role comparison against both unified and raw platform role."""
-    unified = str(getattr(el, "role", "") or "")
-    raw = str(getattr(el, "raw_role", "") or "")
+    unified = _val(getattr(el, "role", "") or "")
+    raw = _val(getattr(el, "raw_role", "") or "")
     return role == unified or role == raw
 
 
