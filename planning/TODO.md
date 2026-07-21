@@ -85,8 +85,18 @@ Tightly coupled; best done by **one agent**, not fanned out.
       `EmptyTree`/`WindowGone`, re-checks ownership; `reset_to_known_state` — minimal
       run-reset-then-`wait_until_ready` convention. `tests/test_ui.py::TestAssertOwned`/
       `TestWaitUntilReady`/`TestResetToKnownState`)
-- [ ] Success criterion: full suite runs alongside Cameron's open apps, provably touching none
+- [x] Success criterion: full suite runs alongside Cameron's open apps, provably touching none
       (assert on PID ownership, not absence of visible damage)
+      (`tests/test_acceptance_phase2.py` — the cohesive Phase-2 acceptance proof of all four
+      criteria. Fake-driven (default `pytest`, green with no desktop): a fake desktop holds our
+      owned window plus simulated *Cameron's real apps* (open log Notepad + Logix Designer w/
+      unsaved changes); `TestUnownedWindowsAreUntouchable` proves criteria 1 & 4 structurally,
+      and `test_shipped_suite_*` runs the **shipped** `app_session` fixture as a real
+      multi-check pytest suite via `pytester` — one check abandons a modal — auditing
+      touched-none + no-residue from outside the run (criteria 1/2/3, structural not eyeballed).
+      A `live` mspaint test proves criteria 1 & 4 against a real desktop; ran green here, no
+      stray process/scratch left. Criteria 2/3 are teardown properties proven deterministically
+      by the fake suite rather than risked live.)
 
 ## Phase 3 — The autonomous trigger → Phase 2
 
