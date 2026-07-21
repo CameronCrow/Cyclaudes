@@ -79,48 +79,58 @@ The ordering is deliberate: **the trigger comes last.** A trigger that fires unr
 verification is worse than no trigger — it converts a visible stall into an invisible false pass.
 Phases 1–2 exist to earn the right to fire automatically.
 
-## Current State (2026-07-20 — end of session, resume here)
+## Current State (2026-07-20 — Phase 1 COMPLETE, `main` is green)
 
-**Phase 1 is roughly half built and `main` is green.** 54 tests pass under bare `python -m pytest`;
-CI runs the suite on every PR (`.github/workflows/tests.yml`, Windows-only for now).
+**Phase 1 is done.** 72 tests pass under bare `python -m pytest` (plus 4 `live` tests deselected by
+default); CI runs the suite on every PR (`.github/workflows/tests.yml`, Windows-only for now).
 
 Landed:
 - `src/cyclaudes/ui.py` — discipline layer over touchpoint (#2, PR #9). Actions return `None`
   unconditionally, name-only API, own window/element matching ladder that raises on ambiguity.
 - `src/cyclaudes/abstain.py` + `pytest_plugin.py` — `CannotVerify` with its own pytest outcome
-  and exit code 12 (#1, PR #10). Verified by hand: all-abstain → 12, pass+abstain → 12,
-  abstain+real-failure → 1.
+  and exit code 12 (#1, PR #10).
+- `src/cyclaudes/pytest_ui.py` — the shipped `window` fixture + `@pytest.mark.window` (#3).
 - `skills/verify-ui/SKILL.md` — the workflow doc (#4, PR #8).
-
-Still open: **#3** (fixtures), **#5** (first real-UI check), **#6** (prove a broken change fails),
-**#7** (prove abstention is never read as success). Dependency chain: #3 → #5 → {#6, #7}.
+- `tests/test_notepad_live.py` — the first real-UI check, ran green 3× (#5).
+- `tests/test_success_criterion_2.py` / `_3.py` — no-false-pass (#6) and abstention-is-never-
+  success (#7), both driven through the real discipline layer.
 
 ### Next action
 
-Resume the second sweep at lvl 2 (`sonnet` Easy / `opus` Harder+Hardest). One agent should take
-**#3 and #5 together** — #5 is #3's first consumer, and building fixtures without a consumer means
-reworking them. Then #6 and #7 fan out in parallel.
+**Start Phase 2 (driving the app).** Its highest-value first task is PID-scoped window ownership
+(`planning/PHASE_2.md`) — refuse to enumerate/act on windows we did not launch. The Notepad live
+test's launch/teardown fixture is throwaway Phase-1 scaffolding; Phase 2 replaces it with the
+reusable, teardown-guaranteed `app_session` fixture.
 
-### Two unresolved live-UI findings — read before writing code
+### The two live-UI findings — RESOLVED (2026-07-20)
 
-An agent started #3/#5, hit these against a real UI, and was stopped for budget before claiming or
-committing anything. Its transcript was lost, so both are **leads to reproduce, not diagnoses**
-(full write-up in the comment on issue #5):
+Both reproduced against live Notepad and fixed; each has a regression test.
 
-1. **"Enum bug confirmed"** — no surviving detail. Could be touchpoint, our role/state handling, or
-   the seam between them. If it turns out to be enum-coupling, it is a *portability* defect, since
-   Phase 1 forbids depending on UIA's fixed control-type enum.
-2. **Snapshots taking ~30s** — potentially design-level rather than a bug. `ui.py` re-snapshots
-   after every action by design; at 30s per snapshot a ten-assertion check costs five minutes and
-   the Phase 3 autonomous loop is unusable. Test scope/depth/other-open-apps hypotheses first. If
-   snapshots are inherently slow, that is a Phase 1 design input (caching within an assertion,
-   scoped subtree reads, batching) and must be settled before Phase 2 builds on it.
+1. **Enum bug — CONFIRMED, portability defect, fixed** (`ee216df`). Touchpoint returns roles/states
+   as `enum.Enum` members; `ui.py` stringified them with `str()`, yielding `"State.CHECKED"` instead
+   of the portable `.value` `"checked"`, so every `assert_state`/unified-role filter silently never
+   matched the real driver. The 54 fake-driven tests used plain-string states and never caught it.
+   Fixed with a `.value`-aware `_val()` (also correct on macOS, where AX reports bare strings).
+2. **~30s snapshots — CONFIRMED, not inherent, fixed** (`b4a833c`). Root cause was `_require_window()`
+   calling `_tp.windows()` (a full top-level enumeration, ~8s with 19 windows open, ~30s with a big
+   tree like Logix Designer also open) on *every* `_snapshot()`. A scoped `_tp.elements(window_id=…)`
+   read is ~50ms, so the hot path now does just that; `windows()` is paid only on the empty-read
+   path, to tell `WindowGone` from a denied-a11y `EmptyTree`. **Measured live: 8000ms → 44ms per
+   snapshot; a 10-assert check 80s → 0.42s.** The tool's cheap-verification premise holds.
 
-### Known gap
+### Known gap — CLOSED (#3)
 
-`ui.py` defines `ABSTENTION_CONDITIONS = (EmptyTree, WindowGone)` and `abstain.py` defines
-`CannotVerify`, but **nothing connects them** — an empty tree currently surfaces as a failure
-rather than an abstention. Fails safe, so not urgent; belongs in #3's fixture work.
+`ABSTENTION_CONDITIONS = (EmptyTree, WindowGone)` now connects to `CannotVerify` via a small registry
+in `abstain.py` (`register_abstention_types`), which `ui.py` populates at import. An empty tree /
+vanished window abstains rather than failing; the registry refuses any `AssertionError` subclass, so
+a real UI failure can never be reclassified as "could not verify".
+
+### Secondary cost to settle in Phase 2 (issue #11)
+
+Distinct from the fixed per-assertion snapshot: `_tp.windows()` itself is ~8s on a busy desktop, so
+window *resolution* (`ui.window`) and the `close()` / `WindowGone` liveness polling still pay it
+once per check. Tolerable now (resolution is one-time), but PID-scoped ownership in Phase 2 should
+look for a lighter "does this one window still exist" path than a full enumeration.
 
 ## Related
 
