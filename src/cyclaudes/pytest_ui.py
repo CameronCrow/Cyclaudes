@@ -37,6 +37,17 @@ could write a file) and retries; and as a last resort it **force-kills by PID**.
 Because it runs from the fixture's finalizer, it fires even when the check fails
 or errors — a wedged run cannot poison later ones.
 
+``app_session`` also owns **scratch workspace isolation** (issue #15, Phase 2C):
+the launched process's ``cwd`` is always a fresh directory from
+``tempfile.mkdtemp()``, never Cameron's real working directory, and an
+app-specific ``scratch_arg=`` marker option can point an app's own profile /
+data-dir flag at that same directory for apps that don't just honor ``cwd``.
+The scratch directory is removed in the fixture's outermost finalizer — after
+the process is confirmed dead, so nothing still has it open — regardless of
+whether the check passed, failed, or errored. This is deliberately app-agnostic
+(a directory plus optional opaque command-line templates), not a Notepad- or
+mspaint-specific mechanism.
+
 ``touchpoint`` is imported lazily inside the fixtures, not at module load, so
 this plugin (which pytest imports at startup) never drags the driver onto the
 startup path for a run that uses no cyclaudes fixture. The abstention wiring
@@ -46,7 +57,9 @@ that makes an empty tree / vanished window *abstain* rather than fail lives in
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 import time
 
 import pytest
@@ -59,6 +72,9 @@ DEFAULT_READY_TIMEOUT = 10.0
 DEFAULT_READY_POLL = 0.25
 #: How long to wait for a force-killed process to actually die, seconds.
 DEFAULT_KILL_TIMEOUT = 5.0
+#: Prefix for the per-session scratch directory (issue #15), so a stray one
+#: left behind by a hard crash is easy to spot and sweep in a temp dir.
+SCRATCH_DIR_PREFIX = "cyclaudes-app_session-"
 
 #: Modal buttons that dismiss a save/discard prompt **without writing anything**
 #: to disk. Teardown will only ever click one of these to get a blocking modal
@@ -99,7 +115,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "takes it), own its PID, wait for its first window, and pass the owned "
         "handle to the `app_session` fixture. opts: app=, title=, title_contains= "
         "narrow the owned-window resolve; timeout=, poll= tune the handle; "
-        "ready_timeout=, ready_poll= tune the wait for the first window.",
+        "ready_timeout=, ready_poll= tune the wait for the first window; "
+        "scratch_arg= (str or sequence of str, each with a `{scratch}` "
+        "placeholder) appends app-specific profile/data-dir flags pointing at "
+        "the scratch workspace, beyond the cwd= isolation every session gets.",
     )
 
 
@@ -241,6 +260,26 @@ def _teardown_session(proc, win, ui) -> None:
     _ensure_process_dead(proc)
 
 
+def _scratch_command(cmd, scratch_arg, scratch_dir: str):
+    """Return *cmd* with any ``scratch_arg`` template(s) appended, path filled in.
+
+    ``scratch_arg`` is the escape hatch for apps that don't honor ``cwd=``
+    alone — a profile directory switch, a ``--user-data-dir=``-style flag,
+    etc. It stays completely app-agnostic: this function knows nothing about
+    any particular app, only that it may have been handed a format-string
+    template (or several) containing a ``{scratch}`` placeholder. ``None``
+    (the default) leaves *cmd* untouched, since ``cwd=`` isolation alone is
+    enough for most apps.
+    """
+    if scratch_arg is None:
+        return cmd
+    templates = [scratch_arg] if isinstance(scratch_arg, str) else list(scratch_arg)
+    extra = [t.format(scratch=scratch_dir) for t in templates]
+    if isinstance(cmd, str):
+        return " ".join([cmd, *extra])
+    return [*cmd, *extra]
+
+
 @pytest.fixture
 def app_session(request: pytest.FixtureRequest):
     """Launch the marked process, yield an owned handle, always tear it down.
@@ -253,6 +292,15 @@ def app_session(request: pytest.FixtureRequest):
     Teardown runs from the fixture finalizer, so it fires even when the check
     fails or errors: it closes the window surviving a blocking modal, and
     force-kills the process by PID as a last resort (see module docstring).
+
+    **Scratch workspace isolation** (issue #15): the process is always
+    launched with ``cwd=`` a fresh :func:`tempfile.mkdtemp` directory, never
+    Cameron's real working directory, so nothing a check does can land on his
+    real files. Apps that need more than ``cwd=`` (a profile/data-dir switch)
+    can be pointed at the same directory via the marker's ``scratch_arg=``
+    option. The scratch directory is removed in the outermost finalizer —
+    after the process is confirmed dead, so nothing still has it open —
+    whether the check passed, failed, or errored.
     """
     from . import ui  # lazy: keep touchpoint off the pytest-startup path
 
@@ -274,30 +322,42 @@ def app_session(request: pytest.FixtureRequest):
     ready_poll = opts.pop("ready_poll", DEFAULT_READY_POLL)
     handle_timeout = opts.pop("timeout", ui.DEFAULT_TIMEOUT)
     handle_poll = opts.pop("poll", ui.DEFAULT_POLL)
+    scratch_arg = opts.pop("scratch_arg", None)
     # Whatever is left narrows the owned-window resolve (app=, title=,
     # title_contains=). pid is always our launched process, never taken here.
     criteria = {k: opts[k] for k in ("app", "title", "title_contains") if k in opts}
 
-    proc = subprocess.Popen(cmd)
+    # Never Cameron's real cwd/profile: a fresh scratch directory per session,
+    # removed in the outermost finally below no matter how the check ends.
+    scratch_dir = tempfile.mkdtemp(prefix=SCRATCH_DIR_PREFIX)
     try:
-        with ui.owning(proc.pid):
-            win = _wait_for_first_window(
-                proc,
-                ui,
-                criteria=criteria,
-                ready_timeout=ready_timeout,
-                ready_poll=ready_poll,
-                handle_timeout=handle_timeout,
-                handle_poll=handle_poll,
-            )
-            try:
-                yield win
-            finally:
-                # Graceful, non-destructive close while still owned. Any modal
-                # (e.g. an unsaved-changes prompt from edits the check made) is
-                # dismissed here rather than killed through.
-                _modal_safe_close(win, ui)
+        launch_cmd = _scratch_command(cmd, scratch_arg, scratch_dir)
+        proc = subprocess.Popen(launch_cmd, cwd=scratch_dir)
+        try:
+            with ui.owning(proc.pid):
+                win = _wait_for_first_window(
+                    proc,
+                    ui,
+                    criteria=criteria,
+                    ready_timeout=ready_timeout,
+                    ready_poll=ready_poll,
+                    handle_timeout=handle_timeout,
+                    handle_poll=handle_poll,
+                )
+                win.scratch_dir = scratch_dir  # so a check can target it explicitly
+                try:
+                    yield win
+                finally:
+                    # Graceful, non-destructive close while still owned. Any modal
+                    # (e.g. an unsaved-changes prompt from edits the check made) is
+                    # dismissed here rather than killed through.
+                    _modal_safe_close(win, ui)
+        finally:
+            # The no-residue guarantee, PID-based so it needs no ownership and
+            # runs even if the wait above raised before we ever had a window.
+            _ensure_process_dead(proc)
     finally:
-        # The no-residue guarantee, PID-based so it needs no ownership and runs
-        # even if the wait above raised before we ever had a window.
-        _ensure_process_dead(proc)
+        # Removed last, after the process is confirmed dead, so nothing still
+        # has a file open under it. ignore_errors: best-effort — a locked or
+        # already-gone directory must never mask the check's real outcome.
+        shutil.rmtree(scratch_dir, ignore_errors=True)

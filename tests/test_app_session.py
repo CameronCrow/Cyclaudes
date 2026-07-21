@@ -10,7 +10,11 @@ Teardown is the whole point, so it is what these tests hammer:
   resort;
 * ``pytester`` runs the *shipped* fixture end to end and proves its finalizer
   fires whether the check passes, fails, or errors — the property that keeps a
-  wedged run from poisoning the next one.
+  wedged run from poisoning the next one;
+* the same ``pytester`` harness proves scratch workspace isolation (issue #15,
+  Phase 2C): the launched process's ``cwd`` is the scratch directory, a write
+  during the check lands *inside* it (path containment, not eyeballing), and
+  the directory is gone after teardown on pass, fail, **and** error.
 
 The live test at the bottom (deselected by default, like ``test_notepad_live``)
 launches real Notepad through ``app_session`` and leans on teardown to clean up.
@@ -18,9 +22,11 @@ launches real Notepad through ``app_session`` and leans on teardown to clean up.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import textwrap
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -289,6 +295,44 @@ class TestWaitForFirstWindow:
 
 
 # ---------------------------------------------------------------------------
+# _scratch_command: the app-agnostic {scratch} template substitution helper
+# behind the marker's scratch_arg= option (issue #15).
+# ---------------------------------------------------------------------------
+
+
+class TestScratchCommand:
+    def test_none_leaves_a_list_cmd_untouched(self):
+        assert pytest_ui._scratch_command(["fake.exe"], None, "C:/scratch/abc") == ["fake.exe"]
+
+    def test_single_template_is_appended_to_a_list_cmd(self):
+        cmd = pytest_ui._scratch_command(
+            ["fake.exe"], "--profile-dir={scratch}", "C:/scratch/abc"
+        )
+        assert cmd == ["fake.exe", "--profile-dir=C:/scratch/abc"]
+
+    def test_multiple_templates_are_all_appended_in_order(self):
+        cmd = pytest_ui._scratch_command(
+            ["fake.exe"],
+            ["--profile-dir={scratch}", "--cache-dir={scratch}/cache"],
+            "C:/scratch/abc",
+        )
+        assert cmd == [
+            "fake.exe",
+            "--profile-dir=C:/scratch/abc",
+            "--cache-dir=C:/scratch/abc/cache",
+        ]
+
+    def test_string_cmd_gets_the_template_appended_as_text(self):
+        cmd = pytest_ui._scratch_command("fake.exe", "--profile-dir={scratch}", "C:/scratch/abc")
+        assert cmd == "fake.exe --profile-dir=C:/scratch/abc"
+
+    def test_caller_supplied_list_is_not_mutated(self):
+        cmd = ["fake.exe"]
+        pytest_ui._scratch_command(cmd, "--profile-dir={scratch}", "C:/scratch/abc")
+        assert cmd == ["fake.exe"]  # the marker's own list must stay untouched
+
+
+# ---------------------------------------------------------------------------
 # The shipped fixture, end to end via pytester: teardown fires on pass/fail/error
 # ---------------------------------------------------------------------------
 
@@ -404,6 +448,158 @@ class TestFixtureLifecycle:
         result = pytester.runpytest()
         assert result.ret != 0
         result.stdout.fnmatch_lines(["*needs the command to launch*"])
+
+
+# ---------------------------------------------------------------------------
+# Scratch workspace isolation (issue #15, Phase 2C): a run must be incapable
+# of mutating real user data. Proven end to end via the shipped fixture,
+# fake Popen/driver, and path-containment assertions — never eyeballing.
+# ---------------------------------------------------------------------------
+
+
+def _inner_scratch_module(outcome: str, *, scratch_arg: str | list[str] | None = None) -> str:
+    """A pytester test module that runs the shipped app_session and records
+    everything needed to prove scratch isolation from *outside* the run:
+    where the fake process was launched (cwd + argv), what ``app_session``
+    handed the check as ``.scratch_dir``, and where a file the check writes
+    actually lands — all via ``evidence.json``, since the scratch directory
+    itself is removed by the finalizer before the outer test gets to look.
+    """
+    marker_kw = f", scratch_arg={scratch_arg!r}" if scratch_arg is not None else ""
+    return textwrap.dedent(
+        f'''
+        import json, os, subprocess
+        from pathlib import Path
+        import pytest
+        from cyclaudes import ui
+
+        EVID = Path("evidence.json")
+        def _record(key, value):
+            data = json.loads(EVID.read_text()) if EVID.exists() else {{}}
+            data[key] = value
+            EVID.write_text(json.dumps(data))
+
+        class FakeProc:
+            def __init__(self): self.pid = 4242; self.returncode = None
+            def poll(self): return self.returncode
+            def kill(self):
+                if self.returncode is None: self.returncode = -9
+            def wait(self, timeout=None): return self.returncode
+
+        class W:
+            def __init__(self, pid):
+                self.id, self.title, self.app, self.pid = "w:1", "Untitled", "fakeapp", pid
+        class E:
+            id, name, role, raw_role = "e1", "Text Editor", "document", "DocumentControl"
+            states, value = ["editable"], ""
+
+        class FakeDriver:
+            def __init__(self, proc): self.proc = proc; self.wins = [W(proc.pid)]
+            def windows(self): return list(self.wins)
+            def elements(self, window_id=None, **k):
+                return [E()] if any(w.id == window_id for w in self.wins) else []
+            def get_text_content(self, el): return el.value
+            def close_window(self, wid):
+                self.wins = []
+                if self.proc.returncode is None: self.proc.returncode = 0
+
+        @pytest.fixture(autouse=True)
+        def _fake(monkeypatch):
+            ui.reset_ownership()
+            proc = FakeProc()
+            monkeypatch.setattr(ui, "_tp", FakeDriver(proc))
+
+            def fake_popen(cmd, cwd=None, **kw):
+                _record("popen_cmd", cmd)
+                _record("popen_cwd", cwd)
+                _record("cwd_existed_at_launch", bool(cwd and os.path.isdir(cwd)))
+                return proc
+
+            monkeypatch.setattr(subprocess, "Popen", fake_popen)
+            yield
+            ui.reset_ownership()
+
+        @pytest.mark.app_session(["fake"], app="fakeapp", ready_timeout=1.0, timeout=0.25, poll=0.01{marker_kw})
+        def test_body(app_session):
+            _record("scratch_dir", app_session.scratch_dir)
+            _record("scratch_dir_exists_during_check", os.path.isdir(app_session.scratch_dir))
+            target = os.path.join(app_session.scratch_dir, "written-by-check.txt")
+            with open(target, "w") as f:
+                f.write("scratch data")
+            _record("written_file", target)
+            {outcome}
+        '''
+    )
+
+
+class TestScratchWorkspaceIsolation:
+    def _run(self, pytester, outcome, **kw):
+        pytester.makepyfile(_inner_scratch_module(outcome, **kw))
+        return pytester.runpytest()
+
+    def _evidence(self, pytester) -> dict:
+        return json.loads((pytester.path / "evidence.json").read_text())
+
+    def test_process_is_launched_with_cwd_pointed_at_the_scratch_dir(self, pytester):
+        result = self._run(pytester, "pass")
+        result.assert_outcomes(passed=1)
+        ev = self._evidence(pytester)
+        # Containment, not eyeballing: the exact cwd Popen received IS the
+        # exact path app_session handed the check as .scratch_dir.
+        assert ev["popen_cwd"] == ev["scratch_dir"]
+        assert ev["cwd_existed_at_launch"] is True
+
+    def test_a_write_during_the_check_lands_under_the_scratch_dir(self, pytester):
+        result = self._run(pytester, "pass")
+        result.assert_outcomes(passed=1)
+        ev = self._evidence(pytester)
+        scratch = Path(ev["scratch_dir"]).resolve()
+        written = Path(ev["written_file"]).resolve()
+        assert written.is_relative_to(scratch)  # containment assertion, not eyeballing
+        assert ev["scratch_dir_exists_during_check"] is True
+
+    @pytest.mark.parametrize(
+        "outcome",
+        ["pass", 'assert False, "intentional check failure"', 'raise RuntimeError("boom")'],
+        ids=["pass", "fail", "error"],
+    )
+    def test_scratch_dir_is_removed_on_teardown_regardless_of_outcome(self, pytester, outcome):
+        self._run(pytester, outcome)  # outcome may fail/error the inner test — that's the point
+        ev = self._evidence(pytester)
+        assert not Path(ev["scratch_dir"]).exists()  # no residue, no matter how the check ended
+
+    def test_scratch_dirs_differ_across_sessions(self, pytester):
+        result1 = self._run(pytester, "pass")
+        result1.assert_outcomes(passed=1)
+        first = self._evidence(pytester)["scratch_dir"]
+
+        (pytester.path / "evidence.json").unlink()
+        result2 = self._run(pytester, "pass")
+        result2.assert_outcomes(passed=1)
+        second = self._evidence(pytester)["scratch_dir"]
+
+        assert first != second  # each session gets its own throwaway directory
+
+    def test_scratch_arg_template_is_substituted_into_the_launch_command(self, pytester):
+        result = self._run(pytester, "pass", scratch_arg="--profile-dir={scratch}")
+        result.assert_outcomes(passed=1)
+        ev = self._evidence(pytester)
+        assert ev["popen_cmd"] == ["fake", f"--profile-dir={ev['scratch_dir']}"]
+
+    def test_multiple_scratch_arg_templates_are_all_substituted(self, pytester):
+        result = self._run(
+            pytester,
+            "pass",
+            scratch_arg=["--profile-dir={scratch}", "--cache-dir={scratch}"],
+        )
+        result.assert_outcomes(passed=1)
+        ev = self._evidence(pytester)
+        scratch = ev["scratch_dir"]
+        assert ev["popen_cmd"] == [
+            "fake",
+            f"--profile-dir={scratch}",
+            f"--cache-dir={scratch}",
+        ]
 
 
 # ---------------------------------------------------------------------------
