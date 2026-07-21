@@ -53,9 +53,20 @@ Tightly coupled; best done by **one agent**, not fanned out.
       guess; owned `WindowHandle` re-checks ownership on every read/action; also folded in #11 —
       `close()` liveness now polls a scoped per-window read, not a full `windows()` walk.
       `tests/test_ui.py::TestOwnership`/`TestOwnedLiveness`)
-- [ ] `app_session` fixture — launch, wait-for-ready, yield owned handle
-- [ ] Teardown that survives blocking modals (dismiss non-destructively; force-kill last resort)
+- [x] `app_session` fixture — launch, wait-for-ready, yield owned handle
+      (`pytest_ui.py`: `@pytest.mark.app_session(cmd, ...)` launches the target,
+      `ui.owning(pid)` claims it for the check, an inline PID-scoped wait resolves
+      its first window via `ui.owned_window`, and the owned handle is yielded.
+      `tests/test_app_session.py`; a `live` mspaint test proves launch→own→attach
+      end to end. Finding: current Win11 `notepad.exe` is single-process tabbed,
+      so PID ownership can't launch-and-own it — the fixture fails *safe* there.)
+- [x] Teardown that survives blocking modals (dismiss non-destructively; force-kill last resort)
       and runs even when the check fails → `app_session`
+      (teardown builds on `WindowHandle.close()` raising `ActionNotVerified` when a
+      modal blocks it, dismisses non-destructively — *Don't Save*, never *Save* —
+      retries, then force-kills by PID as last resort; runs from the fixture
+      finalizer so it fires on pass/fail/error. Proven by fake-driven unit tests
+      + pytester lifecycle tests.)
 - [ ] Scratch workspace/profile isolation — runs cannot mutate real user data
 - [ ] Precondition helpers: `wait_until_ready`, `assert_owned`, `reset_to_known_state`
 - [ ] Success criterion: full suite runs alongside Cameron's open apps, provably touching none
