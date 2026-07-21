@@ -67,7 +67,18 @@ Tightly coupled; best done by **one agent**, not fanned out.
       retries, then force-kills by PID as last resort; runs from the fixture
       finalizer so it fires on pass/fail/error. Proven by fake-driven unit tests
       + pytester lifecycle tests.)
-- [ ] Scratch workspace/profile isolation — runs cannot mutate real user data
+- [x] Scratch workspace/profile isolation — runs cannot mutate real user data
+      (`app_session` (`pytest_ui.py`): every session gets its own
+      `tempfile.mkdtemp()` directory as `cwd=`, never Cameron's real working
+      directory; `scratch_arg=` on the marker lets an app-specific
+      profile/data-dir flag point at the same directory for apps that need
+      more than `cwd=`. The directory is removed in the fixture's outermost
+      finalizer — after the process is confirmed dead — on pass, fail, *and*
+      error, folded into #13's existing teardown chain so the force-kill
+      guarantee still holds. `tests/test_app_session.py::TestScratchCommand`/
+      `TestScratchWorkspaceIsolation` assert path containment (cwd == the
+      handed-out `.scratch_dir`, a write during the check resolves *inside*
+      it) rather than eyeballing, and prove removal on all three outcomes.)
 - [x] Precondition helpers: `wait_until_ready`, `assert_owned`, `reset_to_known_state`
       (`ui.py`: `assert_owned` — hard `UnownedWindow` guard built on `is_owned`, never an
       abstention; `wait_until_ready` — blocks until the owned tree is non-empty else abstains
