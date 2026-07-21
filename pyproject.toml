@@ -8,10 +8,12 @@ dependencies = ["touchpoint-py>=0.3.0"]
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
-# Registers the abstention outcome automatically — installing cyclaudes is the
-# only wiring needed. See src/cyclaudes/pytest_plugin.py.
+# Registers the abstention outcome and the `window` fixture automatically —
+# installing cyclaudes is the only wiring needed. See pytest_plugin.py
+# (outcome) and pytest_ui.py (fixture).
 [project.entry-points.pytest11]
 cyclaudes = "cyclaudes.pytest_plugin"
+cyclaudes_ui = "cyclaudes.pytest_ui"
 
 [build-system]
 requires = ["hatchling"]
@@ -23,3 +25,9 @@ packages = ["src/cyclaudes"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Live checks drive a real desktop; deselected by default so CI stays
+# deterministic. Run `pytest -m live` (with an app open) to include them.
+addopts = '-m "not live"'
+markers = [
+    "live: needs a real desktop/GUI; deselected by default",
+]

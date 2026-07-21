@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from .abstain import EXIT_ABSTAINED, CannotVerify
+from .abstain import EXIT_ABSTAINED, abstention_types
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from _pytest.terminal import TerminalReporter
@@ -88,7 +88,10 @@ class AbstentionPlugin:
     def pytest_runtest_makereport(self, item, call):
         report = yield
         excinfo = call.excinfo
-        if excinfo is None or not excinfo.errisinstance(CannotVerify):
+        # CannotVerify plus any driver-registered "could not look" condition
+        # (ui.py's EmptyTree/WindowGone). Read live so registrations that
+        # happen at test-collection time are honoured.
+        if excinfo is None or not excinfo.errisinstance(abstention_types()):
             return report
 
         reason = getattr(excinfo.value, "reason", None) or str(excinfo.value)

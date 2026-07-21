@@ -27,7 +27,10 @@ Tightly coupled; best done by **one agent**, not fanned out.
       that raises on ambiguity, failure messages that print actual states
 - [x] `CannotVerify` + `pytest_runtest_makereport` hook giving abstention its own outcome,
       visually distinct from both pass and fail → *depends on nothing; can start immediately*
-- [ ] `conftest.py` fixtures exposing the discipline layer to checks → `ui.py`
+- [x] `conftest.py` fixtures exposing the discipline layer to checks → `ui.py`
+      (shipped as the `window` fixture + `@pytest.mark.window` in `pytest_ui.py`;
+      also wired the `EmptyTree`/`WindowGone` → abstention seam via an
+      `abstain` registry — closes the "nothing connects them" gap)
 - [x] `verify-ui` skill — declare post-conditions before implementing; abstain rather than guess
       (`skills/verify-ui/SKILL.md`)
 - [ ] Port the Notepad round-trip into the first committed check → `ui.py`, fixtures

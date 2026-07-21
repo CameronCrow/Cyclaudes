@@ -135,6 +135,16 @@ class UIAssertionError(UIError, AssertionError):
 #: define that type itself.
 ABSTENTION_CONDITIONS: tuple[type[UIError], ...] = (EmptyTree, WindowGone)
 
+# Wire the seam (issue #3): tell the abstention plugin to treat these as
+# abstentions, so an empty tree or a vanished window surfaces as "cannot
+# verify" rather than a plain failure. Importing abstain here is fine — the
+# rule ui.py observes is that it must not *define* CannotVerify, not that it
+# can't hand its conditions to the layer that owns it. abstain never imports
+# ui back, so there is no cycle.
+from . import abstain as _abstain  # noqa: E402  (kept next to what it wires)
+
+_abstain.register_abstention_types(*ABSTENTION_CONDITIONS)
+
 
 # ---------------------------------------------------------------------------
 # Formatting helpers (never leak backend IDs)

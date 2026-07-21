@@ -33,7 +33,14 @@ import contextlib
 from collections.abc import Iterator
 from typing import NoReturn
 
-__all__ = ["EXIT_ABSTAINED", "CannotVerify", "abstain_on", "cannot_verify"]
+__all__ = [
+    "EXIT_ABSTAINED",
+    "CannotVerify",
+    "abstain_on",
+    "abstention_types",
+    "cannot_verify",
+    "register_abstention_types",
+]
 
 
 #: Process exit code for a run whose only non-passing outcomes were abstentions.
@@ -73,6 +80,40 @@ class CannotVerify(Exception):
 
     def __str__(self) -> str:
         return self.reason
+
+
+#: Exception types the pytest plugin treats as an abstention. Seeded with
+#: :class:`CannotVerify`; a driver integration registers its own "could not
+#: look" types (``ui.py`` adds ``EmptyTree`` and ``WindowGone``) via
+#: :func:`register_abstention_types`, so this module never has to import the
+#: driver. This is the seam described in the ``ui.py`` docstring: those
+#: conditions mean "the check could not be evaluated", and here is where they
+#: become the abstention outcome.
+_ABSTENTION_TYPES: list[type[BaseException]] = [CannotVerify]
+
+
+def register_abstention_types(*types: type[BaseException]) -> None:
+    """Also treat *types* as abstentions when raised from a check. Idempotent.
+
+    Each type must be an exception that is **not** an :class:`AssertionError`
+    subclass — an abstention a broad ``except AssertionError`` could swallow
+    would defeat the entire trust boundary this module exists to hold.
+    """
+    for t in types:
+        if not (isinstance(t, type) and issubclass(t, BaseException)):
+            raise TypeError(f"{t!r} is not an exception type")
+        if issubclass(t, AssertionError):
+            raise TypeError(
+                f"{t.__name__} is an AssertionError subclass; an abstention "
+                "must not be catchable as an ordinary assertion failure"
+            )
+        if t not in _ABSTENTION_TYPES:
+            _ABSTENTION_TYPES.append(t)
+
+
+def abstention_types() -> tuple[type[BaseException], ...]:
+    """The exception types currently treated as abstentions (CannotVerify first)."""
+    return tuple(_ABSTENTION_TYPES)
 
 
 def cannot_verify(reason: str) -> NoReturn:
