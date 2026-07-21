@@ -1,0 +1,9 @@
+{
+  "name": "cyclaudes",
+  "version": "0.1.0",
+  "description": "Structural UI verification for the autonomous loop: the agent drives a real desktop app through the accessibility tree, asserts post-conditions, and honestly abstains rather than false-pass.",
+  "author": {
+    "name": "Cameron Crow",
+    "url": "https://github.com/CameronCrow"
+  }
+}

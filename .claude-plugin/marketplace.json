@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "cyclaudes",
+  "description": "Cyclaudes — structural UI verification that lets the agent verify its own UI work instead of waiting on a human.",
+  "owner": {
+    "name": "Cameron Crow",
+    "url": "https://github.com/CameronCrow"
+  },
+  "plugins": [
+    {
+      "name": "cyclaudes",
+      "description": "Ships the verify-ui skill: declare UI post-conditions before implementing, drive the real app via touchpoint, assert pass/fail/abstain.",
+      "source": "./",
+      "category": "testing"
+    }
+  ]
+}
