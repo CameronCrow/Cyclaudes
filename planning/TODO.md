@@ -46,8 +46,13 @@ Tightly coupled; best done by **one agent**, not fanned out.
 
 ## Phase 2 — Driving the app → Phase 1
 
-- [ ] PID-scoped window ownership — refuse to enumerate or act on windows we did not launch
+- [x] PID-scoped window ownership — refuse to enumerate or act on windows we did not launch
       *(highest-value task in the phase; fixes the smoke-test near-miss on Cameron's real files)*
+      (`ui.py`: `own`/`disown`/`owning` registry + `owned_window`/`owned_windows` that only
+      resolve/enumerate owned PIDs and **raise** `UnownedWindow`/`NoOwnedWindows` rather than
+      guess; owned `WindowHandle` re-checks ownership on every read/action; also folded in #11 —
+      `close()` liveness now polls a scoped per-window read, not a full `windows()` walk.
+      `tests/test_ui.py::TestOwnership`/`TestOwnedLiveness`)
 - [ ] `app_session` fixture — launch, wait-for-ready, yield owned handle
 - [ ] Teardown that survives blocking modals (dismiss non-destructively; force-kill last resort)
       and runs even when the check fails → `app_session`

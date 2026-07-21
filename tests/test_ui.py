@@ -158,6 +158,14 @@ class FakeTouchpoint:
 FAST = dict(timeout=0.25, poll=0.01)
 
 
+@pytest.fixture(autouse=True)
+def _clean_ownership():
+    """Isolate the module-level owned-PID set between tests (it is global state)."""
+    ui.reset_ownership()
+    yield
+    ui.reset_ownership()
+
+
 @pytest.fixture()
 def fake(monkeypatch):
     tp = FakeTouchpoint()
@@ -499,3 +507,147 @@ class TestSettle:
         with pytest.raises(ui.UIAssertionError) as exc:
             win.assert_text("Text editor", "never appears")
         assert "''" in str(exc.value)  # actual observed text is reported
+
+
+# ---------------------------------------------------------------------------
+# PID-scoped window ownership (Phase 2A, issue #12): never touch a window we
+# did not launch. Ambiguity or an unowned target raises — never a guess.
+# ---------------------------------------------------------------------------
+
+
+class TestOwnership:
+    def test_owned_window_refuses_a_window_we_did_not_launch(self, fake):
+        # THE smoke-test scenario: our launched Notepad (pid 100) sits next to
+        # Cameron's real open log file (pid 200), another Notepad. Resolving by
+        # app must pick OURS; targeting HIS window must raise, never resolve.
+        fake.wins = [
+            FakeWindow(id="w:mine", title="Untitled - Notepad", app="Notepad", pid=100),
+            FakeWindow(id="w:his", title="import-2026.log - Notepad", app="Notepad", pid=200),
+        ]
+        ui.own(100)
+
+        win = ui.owned_window(app="Notepad", **FAST)
+        assert win.pid == 100  # our window, not his
+
+        with pytest.raises(ui.UnownedWindow) as exc:
+            ui.owned_window(title="import-2026.log - Notepad", **FAST)
+        msg = str(exc.value)
+        assert "import-2026.log - Notepad" in msg  # names the offender
+        assert "200" in msg
+
+    def test_owned_windows_enumeration_excludes_unowned(self, fake):
+        fake.wins = [
+            FakeWindow(id="w:mine", title="Mine", app="App", pid=100),
+            FakeWindow(id="w:his", title="His", app="App", pid=200),
+        ]
+        ui.own(100)
+        listed = ui.owned_windows()
+        assert {w.pid for w in listed} == {100}
+        assert [w.title for w in listed] == ["Mine"]
+
+    def test_enumeration_with_nothing_owned_raises(self, fake):
+        fake.wins = [FakeWindow(id="w:his", title="His", app="App", pid=200)]
+        with pytest.raises(ui.NoOwnedWindows):
+            ui.owned_windows()
+
+    def test_owned_window_with_nothing_owned_raises(self, fake):
+        fake.wins = [FakeWindow(id="w:his", title="His", app="App", pid=200)]
+        with pytest.raises(ui.NoOwnedWindows):
+            ui.owned_window(app="App", **FAST)
+
+    def test_owned_window_not_found_among_owned_lists_owned(self, fake):
+        # Criteria that match no window at all (owned or not) -> WindowNotFound,
+        # and the listing is scoped to OUR windows, never the whole desktop.
+        fake.wins = [
+            FakeWindow(id="w:mine", title="Mine", app="App", pid=100),
+            FakeWindow(id="w:his", title="Other", app="Other", pid=200),
+        ]
+        ui.own(100)
+        with pytest.raises(ui.WindowNotFound) as exc:
+            ui.owned_window(app="Nonexistent", **FAST)
+        msg = str(exc.value)
+        assert "Mine" in msg  # our windows are what it lists
+        assert "Other" not in msg  # the unowned window is never disclosed
+
+    def test_ambiguous_among_owned_still_raises(self, fake):
+        fake.wins = [
+            FakeWindow(id="w:1", title="Untitled - Notepad", app="Notepad", pid=1),
+            FakeWindow(id="w:2", title="Other - Notepad", app="Notepad", pid=2),
+        ]
+        ui.own(1)
+        ui.own(2)
+        with pytest.raises(ui.AmbiguousWindow):
+            ui.owned_window(app="Notepad", **FAST)
+
+    def test_acting_on_a_disowned_handle_raises(self, notepad):
+        # notepad fixture uses pid 4242.
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        win.assert_text("Text editor", "")  # works while owned
+
+        ui.disown(4242)
+        # every read and action now refuses — a handle can't outlive its claim
+        with pytest.raises(ui.UnownedWindow):
+            win.read_text("Text editor")
+        with pytest.raises(ui.UnownedWindow):
+            win.click("Save")
+        with pytest.raises(ui.UnownedWindow):
+            win.title()
+        with pytest.raises(ui.UnownedWindow):
+            win.close()
+
+    def test_owning_context_manager_scopes_and_releases(self, fake):
+        fake.wins = [FakeWindow(id="w:1", title="X", app="App", pid=55)]
+        assert not ui.is_owned(55)
+        with ui.owning(55):
+            assert ui.is_owned(55)
+            assert ui.owned_window(app="App", **FAST).pid == 55
+        assert not ui.is_owned(55)  # released on exit
+        with pytest.raises(ui.NoOwnedWindows):
+            ui.owned_window(app="App", **FAST)
+
+    def test_unowned_window_is_not_an_abstention(self):
+        # A refusal to touch someone else's window must fail loudly, never be
+        # read as "cannot verify / nothing broken".
+        assert ui.UnownedWindow not in ui.ABSTENTION_CONDITIONS
+        assert ui.NoOwnedWindows not in ui.ABSTENTION_CONDITIONS
+        assert not issubclass(ui.UnownedWindow, AssertionError)
+
+    def test_unscoped_window_handle_is_not_ownership_checked(self, notepad):
+        # Phase 1's window() path stays usable with nothing owned — it never
+        # claimed ownership, so it must not start refusing now.
+        win = ui.window(app="Notepad", **FAST)
+        assert not ui.owned_pids()
+        win.read_text("Text editor")  # no UnownedWindow
+
+
+class TestOwnedLiveness:
+    """Issue #11: owned-window liveness must not pay a full windows() walk."""
+
+    def test_successful_close_uses_scoped_reads_not_full_enumeration(self, notepad):
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        notepad.windows_calls = 0  # count only the close() work
+        win.close()
+        assert notepad.wins == []
+        assert notepad.windows_calls == 0, (
+            f"close() enumerated all windows {notepad.windows_calls} times; "
+            f"owned-window liveness must stay a scoped per-window read (#11)"
+        )
+
+    def test_modal_blocked_close_still_raises_without_full_enumeration(self, notepad):
+        ui.own(4242)
+        notepad.close_lies = True  # window stays; a modal blocks the close
+        notepad.trees["w:1"].append(
+            {"name": "Save changes?", "role": "dialog", "states": ["modal"]}
+        )
+        win = ui.owned_window(app="Notepad", **FAST)
+        notepad.windows_calls = 0
+        with pytest.raises(ui.ActionNotVerified) as exc:
+            win.close()
+        msg = str(exc.value)
+        assert "still exists" in msg
+        assert "Save changes?" in msg  # blocking dialog named from a scoped read
+        assert notepad.windows_calls == 0, (
+            "a blocked-close diagnosis must not walk every top-level window (#11)"
+        )

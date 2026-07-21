@@ -40,16 +40,37 @@ Portability rules (Cameron moves to macOS ~2026-08-03):
   as "nothing is broken". ``assert_gone`` in particular refuses to pass on
   an empty tree.
 
+PID-scoped window ownership (Phase 2A, issue #12):
+
+An unattended run on Cameron's live desktop is the normal case, not the
+exception. The smoke test proved the danger: ``wait_for_window("Notepad")``
+substring-grabbed his real open log file, one ``type_text`` from corrupting
+his work. So the layer tracks the PIDs of processes *it* launched (an
+"owned set", :func:`own` / :func:`owning`) and offers a strictly safer
+surface — :func:`owned_window` and :func:`owned_windows` — that will only
+ever resolve, return, or enumerate windows in that set. A criteria match on
+an *unowned* window raises :class:`UnownedWindow` (naming it) rather than
+resolving to it, an empty owned set raises :class:`NoOwnedWindows` rather
+than falling back to the whole desktop, and an owned :class:`WindowHandle`
+re-checks ownership on every read and action so it cannot outlive its claim.
+Ownership is pure PID-set membership — no titles, roles, or platform state
+are involved — so it carries over unchanged to macOS PID semantics (Phase 5).
+
 Abstention seam: this module does not define ``CannotVerify`` (issue #1
 owns it). Instead, :data:`ABSTENTION_CONDITIONS` lists the exception types
 that mean "the check could not be evaluated" (as opposed to "the check
 failed"); the pytest integration layer maps those onto its abstention
-outcome.
+outcome. Ownership refusals (:class:`UnownedWindow`, :class:`NoOwnedWindows`)
+are deliberately *not* abstentions — they are safety errors that must fail
+loudly, never be read as "nothing to verify".
 """
 
 from __future__ import annotations
 
+import contextlib
 import time
+from collections.abc import Iterator
+from typing import NamedTuple
 
 import touchpoint as _tp  # tests replace ui._tp with a fake; keep all calls on this alias
 
@@ -62,11 +83,22 @@ __all__ = [
     "AmbiguousWindow",
     "ElementNotFound",
     "EmptyTree",
+    "NoOwnedWindows",
+    "OwnedWindow",
     "UIAssertionError",
     "UIError",
+    "UnownedWindow",
     "WindowGone",
     "WindowHandle",
     "WindowNotFound",
+    "disown",
+    "is_owned",
+    "own",
+    "owned_pids",
+    "owned_window",
+    "owned_windows",
+    "owning",
+    "reset_ownership",
     "window",
 ]
 
@@ -103,6 +135,27 @@ class ElementNotFound(UIError):
 
 class AmbiguousElement(UIError):
     """More than one element matched the name query; never guesses."""
+
+
+class UnownedWindow(UIError):
+    """A targeted or matched window belongs to a PID this layer did not launch.
+
+    The core Phase-2 safety property: an unattended run must never act on,
+    return, or enumerate a window it does not own. Rather than resolve to the
+    unowned window (the smoke-test footgun — grabbing Cameron's real log
+    file), the ownership-scoped surface raises this and names the offender.
+    Deliberately a hard error, not an abstention: "that isn't mine to touch"
+    must fail loudly, never read as "nothing to verify".
+    """
+
+
+class NoOwnedWindows(UIError):
+    """Ownership-scoped resolution/enumeration was asked for with nothing owned.
+
+    Refusing to fall back to the full desktop is the point: with an empty
+    owned set there is, by definition, no window this layer is allowed to
+    touch. :func:`own` a launched process's PID first.
+    """
 
 
 class EmptyTree(UIError):
@@ -187,6 +240,214 @@ def _role_matches(el, role: str) -> bool:
     return role == unified or role == raw
 
 
+def _matches_window(w, app, title, title_contains, pid) -> bool:
+    """Whether window ``w`` satisfies every supplied criterion (strict)."""
+    if app is not None and str(w.app).lower() != app.lower():
+        return False
+    if title is not None and str(w.title) != title:
+        return False
+    if title_contains is not None and title_contains.lower() not in str(w.title).lower():
+        return False
+    if pid is not None and w.pid != pid:
+        return False
+    return True
+
+
+def _criteria_str(app, title, title_contains, pid) -> str:
+    return ", ".join(
+        f"{k}={v!r}"
+        for k, v in (
+            ("app", app),
+            ("title", title),
+            ("title_contains", title_contains),
+            ("pid", pid),
+        )
+        if v is not None
+    )
+
+
+# ---------------------------------------------------------------------------
+# PID-scoped window ownership (Phase 2A, issue #12)
+# ---------------------------------------------------------------------------
+
+#: PIDs of processes this layer launched. The single source of truth for what
+#: the ownership-scoped surface (:func:`owned_window`, :func:`owned_windows`,
+#: and owned :class:`WindowHandle` re-checks) is permitted to touch. Managed
+#: through :func:`own` / :func:`disown` / :func:`owning`; a launcher fixture
+#: (issue #13) owns a PID right after spawning and disowns it at teardown.
+_owned_pids: set[int] = set()
+
+
+class OwnedWindow(NamedTuple):
+    """A read-only descriptor for one owned window (no actions on it).
+
+    Returned by :func:`owned_windows`. Actionable access is via
+    :func:`owned_window`, which returns a live :class:`WindowHandle`.
+    """
+
+    app: str
+    title: str
+    pid: int
+
+
+def own(pid: int) -> int:
+    """Register ``pid`` as owned — a process this layer launched. Idempotent.
+
+    Returns the PID for convenient inline use. From this point the
+    ownership-scoped surface will resolve, return and enumerate that
+    process's windows; nothing else becomes touchable through it.
+    """
+    pid = int(pid)
+    _owned_pids.add(pid)
+    return pid
+
+
+def disown(pid: int) -> None:
+    """Drop ``pid`` from the owned set. Idempotent.
+
+    Any owned :class:`WindowHandle` for it immediately refuses further reads
+    and actions (raising :class:`UnownedWindow`), so a handle cannot outlive
+    the claim that justified touching it.
+    """
+    _owned_pids.discard(int(pid))
+
+
+def is_owned(pid: int) -> bool:
+    """Whether ``pid`` is currently in the owned set."""
+    return int(pid) in _owned_pids
+
+
+def owned_pids() -> frozenset[int]:
+    """An immutable snapshot of the currently-owned PIDs."""
+    return frozenset(_owned_pids)
+
+
+def reset_ownership() -> None:
+    """Forget every owned PID. A test/teardown seam; use :func:`owning` in code."""
+    _owned_pids.clear()
+
+
+@contextlib.contextmanager
+def owning(pid: int) -> Iterator[int]:
+    """Own ``pid`` for the duration of the block, disowning it on exit.
+
+    The natural shape for a launcher fixture: own right after spawn, and
+    guarantee the claim is dropped even if the check fails or errors::
+
+        proc = launch(...)
+        with ui.owning(proc.pid):
+            win = ui.owned_window(app=...)
+            ...
+    """
+    already = is_owned(pid)
+    own(pid)
+    try:
+        yield int(pid)
+    finally:
+        if not already:
+            disown(pid)
+
+
+def owned_windows() -> list[OwnedWindow]:
+    """Enumerate **only** owned windows; never lists one we did not launch.
+
+    Raises:
+        NoOwnedWindows: nothing is owned, so there is nothing this layer may
+            enumerate (it refuses to fall back to the whole desktop).
+    """
+    if not _owned_pids:
+        raise NoOwnedWindows(
+            "owned_windows() called with an empty owned set — refusing to "
+            "enumerate windows this layer did not launch. own() a launched "
+            "process's PID first."
+        )
+    return [
+        OwnedWindow(str(w.app), str(w.title), w.pid)
+        for w in _tp.windows()
+        if w.pid in _owned_pids
+    ]
+
+
+def owned_window(
+    *,
+    app: str | None = None,
+    title: str | None = None,
+    title_contains: str | None = None,
+    pid: int | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    poll: float = DEFAULT_POLL,
+) -> "WindowHandle":
+    """Resolve exactly one **owned** window, or raise. The safe Phase-2 surface.
+
+    Same strict matching as :func:`window`, but the candidate pool is scoped
+    to owned PIDs *before* anything is chosen, so an unowned window can never
+    be resolved. A criteria match that only hits an unowned window raises
+    :class:`UnownedWindow` (naming it) instead of silently missing — that is
+    the exact smoke-test footgun made loud.
+
+    Raises:
+        NoOwnedWindows: the owned set is empty.
+        UnownedWindow: the criteria match only window(s) we did not launch.
+        WindowNotFound: nothing matched among owned windows.
+        AmbiguousWindow: several owned windows matched.
+        EmptyTree: the platform reported no windows at all.
+        ValueError: no criteria given.
+    """
+    if app is None and title is None and title_contains is None and pid is None:
+        raise ValueError(
+            "owned_window() needs at least one of app=, title=, title_contains=, "
+            "pid= — refusing to pick a window arbitrarily"
+        )
+    if not _owned_pids:
+        raise NoOwnedWindows(
+            "owned_window() called with an empty owned set — refusing to "
+            "resolve against windows this layer did not launch. own() a "
+            "launched process's PID first."
+        )
+
+    wins = _tp.windows()
+    if not wins:
+        raise EmptyTree(
+            "The platform reported zero open windows. This usually means "
+            "accessibility access is denied (on macOS: System Settings > "
+            "Privacy & Security > Accessibility for the host process), not "
+            "that everything is fine."
+        )
+
+    criteria = _criteria_str(app, title, title_contains, pid)
+    matched = [w for w in wins if _matches_window(w, app, title, title_contains, pid)]
+    owned_matched = [w for w in matched if w.pid in _owned_pids]
+
+    if not owned_matched:
+        unowned = [w for w in matched if w.pid not in _owned_pids]
+        if unowned:
+            listing = "\n  ".join(_describe_window(w) for w in unowned)
+            raise UnownedWindow(
+                f"{len(unowned)} window(s) match ({criteria}) but belong to "
+                f"PIDs this layer did not launch (owned={sorted(_owned_pids)}); "
+                f"refusing to touch a window we did not open:\n  {listing}\n"
+                f"If this process really is ours, own() its PID first."
+            )
+        owned_open = [w for w in wins if w.pid in _owned_pids]
+        listing = "\n  ".join(_describe_window(w) for w in owned_open) or "<none open>"
+        raise WindowNotFound(
+            f"No owned window matches ({criteria}). Owned windows currently "
+            f"open:\n  {listing}"
+        )
+
+    if len(owned_matched) > 1:
+        listing = "\n  ".join(_describe_window(w) for w in owned_matched)
+        raise AmbiguousWindow(
+            f"{len(owned_matched)} owned windows match ({criteria}); refusing "
+            f"to guess. Candidates:\n  {listing}\nDisambiguate with title= or pid=."
+        )
+
+    won = owned_matched[0]
+    return WindowHandle(
+        won.id, app=str(won.app), pid=won.pid, owned=True, timeout=timeout, poll=poll
+    )
+
+
 # ---------------------------------------------------------------------------
 # Window resolution
 # ---------------------------------------------------------------------------
@@ -241,29 +502,9 @@ def window(
             "that everything is fine."
         )
 
-    def _matches(w) -> bool:
-        if app is not None and str(w.app).lower() != app.lower():
-            return False
-        if title is not None and str(w.title) != title:
-            return False
-        if title_contains is not None and title_contains.lower() not in str(w.title).lower():
-            return False
-        if pid is not None and w.pid != pid:
-            return False
-        return True
+    candidates = [w for w in wins if _matches_window(w, app, title, title_contains, pid)]
 
-    candidates = [w for w in wins if _matches(w)]
-
-    criteria = ", ".join(
-        f"{k}={v!r}"
-        for k, v in (
-            ("app", app),
-            ("title", title),
-            ("title_contains", title_contains),
-            ("pid", pid),
-        )
-        if v is not None
-    )
+    criteria = _criteria_str(app, title, title_contains, pid)
     if not candidates:
         listing = "\n  ".join(_describe_window(w) for w in wins[:40])
         raise WindowNotFound(
@@ -302,7 +543,16 @@ class WindowHandle:
     intrinsic post-condition — pair it with an ``assert_*`` call.
     """
 
-    def __init__(self, window_id, *, app: str, pid: int, timeout: float, poll: float):
+    def __init__(
+        self,
+        window_id,
+        *,
+        app: str,
+        pid: int,
+        timeout: float,
+        poll: float,
+        owned: bool = False,
+    ):
         # The backend window id is an opaque private handle: never parsed,
         # never exposed. (Element ids are never even stored.)
         self._window_id = window_id
@@ -310,13 +560,37 @@ class WindowHandle:
         self.pid = pid
         self._timeout = timeout
         self._poll = poll
+        # An owned handle re-checks PID ownership before every read and action
+        # (see _check_owned), so it cannot be used after its process is
+        # disowned. Handles from the unscoped window() are not owned and skip
+        # the check — Phase 1's "app already open, manual precondition" path.
+        self._owned = owned
 
     def __repr__(self) -> str:  # no backend ids in the repr either
-        return f"WindowHandle(app={self.app!r}, pid={self.pid})"
+        kind = "owned " if self._owned else ""
+        return f"{kind}WindowHandle(app={self.app!r}, pid={self.pid})"
 
     # -- Fresh reads -------------------------------------------------------
 
+    def _check_owned(self) -> None:
+        """Refuse to touch the window if this owned handle's PID is no longer owned.
+
+        A no-op for unscoped handles. For owned handles this is the guarantee
+        that a handle can never outlive its claim: once :func:`disown` (or a
+        fixture teardown) drops the PID, every further read and action raises
+        rather than acting on a window the layer no longer owns. Pure set
+        membership — no enumeration, no titles, portable to macOS PIDs.
+        """
+        if self._owned and self.pid not in _owned_pids:
+            raise UnownedWindow(
+                f"window (app={self.app!r}, pid={self.pid}) is no longer owned "
+                f"(owned={sorted(_owned_pids)}); refusing to act on it. The "
+                f"process was disowned or torn down — re-resolve via "
+                f"owned_window() after own()-ing it again."
+            )
+
     def _require_window(self):
+        self._check_owned()
         for w in _tp.windows():
             if w.id == self._window_id:
                 return w
@@ -334,6 +608,7 @@ class WindowHandle:
         # every assertion. A scoped read is cheap and already returns empty
         # when the window is gone; only then do we pay for windows() to tell
         # WindowGone from a genuinely empty tree.
+        self._check_owned()
         els = _tp.elements(window_id=self._window_id)
         if els:
             return els
@@ -496,18 +771,29 @@ class WindowHandle:
 
         This is the exact footgun observed live: ``close_window()``
         returned ``OK`` while a modal save-prompt silently blocked the
-        close. The driver's return value is discarded; the window list is
-        re-read until the window disappears, and :class:`ActionNotVerified`
+        close. The driver's return value is discarded; the window is
+        re-checked until it disappears, and :class:`ActionNotVerified`
         is raised — with any visible dialog-ish elements named — if it
         does not.
+
+        Liveness here uses a **scoped** per-window element read, never a full
+        ``_tp.windows()`` enumeration (issue #11). A busy desktop makes
+        ``windows()`` cost seconds, so the old poll loop (one enumeration per
+        ``poll`` interval) made the interval meaningless and a blocked-close
+        diagnosis take ~8s. A window that has closed returns an *empty* scoped
+        read; a window a modal is still blocking keeps that dialog in its tree,
+        so the read stays *non-empty* — which is exactly the signal that
+        distinguishes "closed" from "blocked" without walking the whole
+        desktop. (Perms-denied "empty tree" is not a concern here: that would
+        have failed every earlier read on this handle, long before close.)
         """
+        self._check_owned()
         _tp.close_window(self._window_id)  # return value deliberately discarded
         timeout = self._timeout if timeout is None else timeout
         deadline = time.monotonic() + timeout
         while True:
-            still = next((w for w in _tp.windows() if w.id == self._window_id), None)
-            if still is None:
-                return None
+            if not _tp.elements(window_id=self._window_id):
+                return None  # scoped read empty -> the window is gone
             if time.monotonic() >= deadline:
                 break
             time.sleep(self._poll)
@@ -532,10 +818,9 @@ class WindowHandle:
         )
         raise ActionNotVerified(
             f"close() was dispatched but window (app={self.app!r}, "
-            f"pid={self.pid}, title={still.title!r}) still exists after "
-            f"{timeout:.1f}s — a modal prompt may be blocking it. The "
-            f"driver's own return value was ignored — only the window list "
-            f"decides." + hint_msg
+            f"pid={self.pid}) still exists after {timeout:.1f}s — a modal "
+            f"prompt may be blocking it. The driver's own return value was "
+            f"ignored — only the tree decides." + hint_msg
         )
 
     # -- Assertions (re-snapshot, settle, report actuals) -------------------
