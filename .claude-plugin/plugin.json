@@ -5,5 +5,13 @@
   "author": {
     "name": "Cameron Crow",
     "url": "https://github.com/CameronCrow"
+  },
+  "mcpServers": {
+    "touchpoint": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "touchpoint.mcp.server"],
+      "env": { "TOUCHPOINT_MODE": "no-vision" }
+    }
   }
 }
