@@ -33,7 +33,10 @@ Tightly coupled; best done by **one agent**, not fanned out.
       `abstain` registry — closes the "nothing connects them" gap)
 - [x] `verify-ui` skill — declare post-conditions before implementing; abstain rather than guess
       (`skills/verify-ui/SKILL.md`)
-- [ ] Port the Notepad round-trip into the first committed check → `ui.py`, fixtures
+- [x] Port the Notepad round-trip into the first committed check → `ui.py`, fixtures
+      (`tests/test_notepad_live.py`, marked `live`; ran green 3x — round-trip,
+      opaque states, right-window-among-several, modal-on-close asserted
+      structurally, clean dismissal)
 - [ ] Success criterion 2: deliberately broken change → check fails (no false pass)
 - [ ] Success criterion 3: deliberately unverifiable assertion → abstains, and is **not** reported
       as success
