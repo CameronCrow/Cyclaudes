@@ -3,10 +3,10 @@ name = "cyclaudes"
 version = "0.1.0"
 description = "Structural UI verification so an agent can check its own work without a human"
 requires-python = ">=3.10"
-dependencies = ["touchpoint-py>=0.3.0"]
-
-[project.optional-dependencies]
-dev = ["pytest>=8.0"]
+# pytest is a runtime dependency, not a dev tool: a cyclaudes check *is* a
+# pytest test, so `pip install cyclaudes` must yield a runnable verifier in
+# one command. Do not demote it to an extra.
+dependencies = ["touchpoint-py>=0.3.0", "pytest>=8.0"]
 
 # Registers the abstention outcome and the `window` fixture automatically —
 # installing cyclaudes is the only wiring needed. See pytest_plugin.py

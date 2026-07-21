@@ -3,7 +3,7 @@
 ## Running them
 
 ```bash
-pip install -e ".[dev]"   # required: the abstention plugin loads via entry point
+pip install -e .          # required: the abstention plugin loads via entry point
 python -m pytest          # whole suite
 python -m pytest -v       # see each outcome by name (PASSED / FAILED / ABSTAINED)
 python -m pytest tests/test_abstain_outcome.py   # just the trust boundary
