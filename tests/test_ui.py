@@ -66,6 +66,7 @@ class FakeTouchpoint:
         self.generation = 0
         self.issued_ids: set[str] = set()
         self._live: dict[str, dict] = {}  # latest-snapshot id -> spec
+        self.windows_calls = 0
         self.set_value_lies = False
         self.close_lies = False
         self.set_value_apply_after: int = 0  # extra snapshots before a write shows up
@@ -75,9 +76,15 @@ class FakeTouchpoint:
     # -- driver surface used by ui.py --
 
     def windows(self):
+        self.windows_calls += 1
         return list(self.wins)
 
     def elements(self, window_id=None, **kwargs):
+        # Real touchpoint: a scoped read on a window that no longer exists
+        # comes back empty (verified live 2026-07-20). The fake must match, or
+        # it would report a live tree for a dead window and mask WindowGone.
+        if window_id not in {w.id for w in self.wins}:
+            return []
         self.generation += 1
         # apply delayed writes whose time has come
         still_pending = []
@@ -447,6 +454,37 @@ class TestEmptyTree:
 # ---------------------------------------------------------------------------
 # Settle/retry: racy updates don't fail, but the deadline is honest
 # ---------------------------------------------------------------------------
+
+
+class TestSnapshotCost:
+    def test_reads_and_asserts_never_re_enumerate_all_windows(self, notepad):
+        # The second live-UI finding: _require_window() called _tp.windows()
+        # on every snapshot, and windows() costs seconds when many apps are
+        # open (~8s live with 19 windows). A live re-snapshot must be a single
+        # window-scoped elements() read, never a full-desktop walk.
+        win = ui.window(app="Notepad", **FAST)
+        notepad.windows_calls = 0  # count only post-resolution work
+        win.read_text("Text editor")
+        win.states("Bold (Ctrl+B)")
+        win.assert_state("Bold (Ctrl+B)", "checked")
+        win.set_value("Text editor", "hi", replace=True)
+        win.assert_text("Text editor", "hi")
+        assert notepad.windows_calls == 0, (
+            f"re-snapshotting a live window enumerated all windows "
+            f"{notepad.windows_calls} times; it must stay scoped to elements()"
+        )
+
+    def test_empty_scoped_read_still_distinguishes_gone_from_empty(self, fake):
+        # The cheap path must not lose the WindowGone/EmptyTree distinction:
+        # window present but tree empty -> EmptyTree; window absent -> WindowGone.
+        fake.wins = [FakeWindow(id="w:1", title="X", app="App", pid=1)]
+        fake.trees["w:1"] = []
+        win = ui.window(app="App", **FAST)
+        with pytest.raises(ui.EmptyTree):
+            win.read_text("anything")
+        fake.wins = []
+        with pytest.raises(ui.WindowGone):
+            win.read_text("anything")
 
 
 class TestSettle:

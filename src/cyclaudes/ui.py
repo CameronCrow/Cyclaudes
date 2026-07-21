@@ -316,17 +316,25 @@ class WindowHandle:
         )
 
     def _snapshot(self):
-        self._require_window()
+        # Hot path: one window-scoped elements() read (~50ms). We deliberately
+        # do NOT call _require_window() here — that enumerates every top-level
+        # window (_tp.windows()), which costs seconds when many apps are open
+        # and was making a single re-snapshot ~8-30s (second live-UI finding on
+        # issue #5). Since ui.py re-snapshots after every action, that tax hit
+        # every assertion. A scoped read is cheap and already returns empty
+        # when the window is gone; only then do we pay for windows() to tell
+        # WindowGone from a genuinely empty tree.
         els = _tp.elements(window_id=self._window_id)
-        if not els:
-            raise EmptyTree(
-                f"Accessibility tree for window (app={self.app!r}, pid={self.pid}) "
-                f"is empty. This usually means accessibility access is denied "
-                f"(on macOS: a missing TCC Accessibility grant yields exactly "
-                f"this), or the app exposes no tree — either way, nothing can "
-                f"be verified. Do not treat this as a pass."
-            )
-        return els
+        if els:
+            return els
+        self._require_window()  # raises WindowGone if the window has vanished
+        raise EmptyTree(
+            f"Accessibility tree for window (app={self.app!r}, pid={self.pid}) "
+            f"is empty. This usually means accessibility access is denied "
+            f"(on macOS: a missing TCC Accessibility grant yields exactly "
+            f"this), or the app exposes no tree — either way, nothing can "
+            f"be verified. Do not treat this as a pass."
+        )
 
     def _resolve(self, query: str, *, role: str | None = None):
         """Resolve a name query against a fresh snapshot; raise rather than guess.
