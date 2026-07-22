@@ -104,7 +104,14 @@ Tightly coupled; best done by **one agent**, not fanned out.
       constrains everything else in this phase)*
 - [ ] Plugin packaging
 - [ ] Criteria capture at implement-time (post-conditions written before the change)
-- [ ] Trigger + cheap relevance test (don't verify non-UI changes)
+- [x] Trigger + cheap relevance test (don't verify non-UI changes)
+      (`hooks/flag_ui_change.py` + `hooks/hooks.json`: `PostToolUse` hook, matcher
+      `Edit|Write`, matches `tool_input.file_path` against a per-repo UI-glob set
+      (default `ui/**`, `**/*.tsx`, `**/*.jsx`, `**/*.xaml`, `**/*.css`, `frontend/**`;
+      overridable via `.cyclaudes/ui-globs.txt`) and appends the de-duplicated
+      repo-relative path to `.cyclaudes/pending-ui/<session_id>.json` per the frozen
+      schema (`planning/PHASE_3.md`) the Stop hook (issue #32) reads. No-op on a
+      non-UI path; never blocks the tool call. `tests/test_flag_ui_change.py`)
 - [x] Loop integration: pass → continue; fail → actionable diff + self-correct; abstain →
       escalate with specifics
 - [x] Bounded retry — cap correct→verify cycles, escalate on exhaustion

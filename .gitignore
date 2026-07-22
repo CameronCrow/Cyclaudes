@@ -21,7 +21,10 @@ logs/
 # temporary files
 *.tmp
 
-# Claude 
+# Claude
 .claude/
 # OPTIONAL: Remove '#' to ignore CLAUDE.md in the repository
 # CLAUDE.md
+
+# Cyclaudes Phase 3 session-scoped trigger state (planning/PHASE_3.md — FROZEN INTERFACE)
+.cyclaudes/
