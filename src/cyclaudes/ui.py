@@ -69,7 +69,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import NamedTuple
 
 import touchpoint as _tp  # tests replace ui._tp with a fake; keep all calls on this alias
@@ -1011,6 +1011,7 @@ def assert_owned(handle_or_pid) -> int:
 def wait_until_ready(
     handle: "WindowHandle",
     *,
+    signal: str | Callable[["WindowHandle"], bool] | None = None,
     timeout: float | None = None,
     poll: float | None = None,
 ) -> "WindowHandle":
@@ -1021,22 +1022,43 @@ def wait_until_ready(
     rendered something to read or act on. (On macOS, an owned window whose tree
     is still empty is not "ready" either.)
 
+    That default notion of "non-empty" is deliberately weak, and some
+    embedded-web surfaces (WebView2/Chromium in particular) exploit the gap:
+    the accessibility tree is lazy, so the very first read back returns only
+    empty ``landmark`` wrappers and window chrome — no DOM — and stays that
+    way until a deeper read engages Chromium accessibility. That tree is
+    "non-empty" by the default check yet has nothing assertable in it, so the
+    first assertion after launch would false-abstain. Pass ``signal`` to gate
+    on real content instead: either the name of an element that must be
+    present (checked via ``handle.exists(signal)``), or a predicate
+    ``(handle) -> bool`` for anything the name-query vocabulary can't express.
+    The predicate is re-evaluated against a fresh snapshot every poll — it is
+    never cached, since readiness can only be observed by re-reading the tree.
+    With no ``signal`` (the default), behaviour is unchanged from before this
+    parameter existed: ready means only "non-empty, owned, live tree".
+
     This never fails-as-assertion. A window that never becomes ready is "could
     not verify", not "verified broken", so at the deadline it re-raises the
     standing abstention condition — :class:`EmptyTree` (nothing in the tree yet,
-    or accessibility access denied) or :class:`WindowGone` (the window vanished
-    before it settled). Both are in :data:`ABSTENTION_CONDITIONS`, so the
-    pytest layer surfaces them as "cannot verify".
+    accessibility access denied, or — with a ``signal`` — the tree stayed
+    non-empty but the expected content never appeared) or :class:`WindowGone`
+    (the window vanished before it settled). Both are in
+    :data:`ABSTENTION_CONDITIONS`, so the pytest layer surfaces them as
+    "cannot verify".
 
     Ownership is re-checked on every poll: the settle uses the handle's own
     fresh read, so a handle whose PID was disowned raises :class:`UnownedWindow`
     — a hard safety error that is *not* caught here (it is not an abstention),
-    so it propagates immediately rather than being retried or swallowed.
+    so it propagates immediately rather than being retried or swallowed. The
+    same holds if a caller-supplied predicate itself raises
+    :class:`UnownedWindow` — it is not one of :data:`ABSTENTION_CONDITIONS`, so
+    it is never swallowed into a retry.
 
     ``timeout`` / ``poll`` default to the handle's own configured settle
     window. Returns the same handle on success, so it chains::
 
         win = ui.wait_until_ready(ui.owned_window(app="Notepad"))
+        win = ui.wait_until_ready(ui.owned_window(app="LLT"), signal="Import")
 
     Raises:
         EmptyTree | WindowGone: the window never became ready (abstention).
@@ -1045,17 +1067,44 @@ def wait_until_ready(
     timeout = handle._timeout if timeout is None else timeout
     poll = handle._poll if poll is None else poll
     deadline = time.monotonic() + timeout
+
+    def _content_ready() -> bool:
+        # handle._snapshot() above already established a non-empty, owned,
+        # live tree; this only decides whether *this* non-empty tree counts
+        # as ready. Re-checked fresh every call (via handle.exists() /
+        # handle._snapshot(), never cached) since a landmark-only cold tree
+        # and a populated one are both "non-empty".
+        if signal is None:
+            return True
+        if callable(signal):
+            return bool(signal(handle))
+        return handle.exists(signal)
+
     while True:
+        abstain = None
+        ready = False
         try:
-            # A non-empty scoped read is the readiness signal; _snapshot()
+            # A non-empty scoped read is the base readiness signal; _snapshot()
             # raises EmptyTree/WindowGone when not ready and UnownedWindow
             # (which we deliberately do NOT catch) when the claim has lapsed.
             handle._snapshot()
+            ready = _content_ready()
+        except ABSTENTION_CONDITIONS as e:
+            abstain = e
+        if ready:
             return handle
-        except ABSTENTION_CONDITIONS:
-            if time.monotonic() >= deadline:
-                raise  # still not ready at the deadline -> abstain, never fail
-            time.sleep(poll)
+        if time.monotonic() >= deadline:
+            if abstain is not None:
+                raise abstain  # still not ready at the deadline -> abstain, never fail
+            raise EmptyTree(
+                f"Window (app={handle.app!r}, pid={handle.pid}) has a "
+                f"non-empty accessibility tree but the readiness signal "
+                f"{signal!r} never appeared before the {timeout}s deadline. "
+                f"This usually means the app's content is still loading (a "
+                f"lazy WebView2/Chromium tree, for instance) or the signal "
+                f"names the wrong element. Do not treat this as a pass."
+            )
+        time.sleep(poll)
 
 
 def reset_to_known_state(
