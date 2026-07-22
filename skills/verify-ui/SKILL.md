@@ -24,9 +24,14 @@ Two rules carry the entire skill. Everything else is detail:
 - **Structural only.** You assert on the accessibility tree. Vision is Phase 4. If the property
   you care about is *visual* — occlusion, clipping, colour, "does this look broken" — the tree
   cannot encode it. That is an abstention today, not a workaround.
-- **App state is a manual precondition for now.** Full launch/navigate orchestration is Phase 2.
-  If you cannot reach the state under test, say so; do not assert against whatever screen you
-  happened to land on.
+- **The framework launches and tears down the app; you write the navigation.** `app_session`
+  (Phase 2, shipped) launches the target in an isolated scratch workspace, owns it by PID —
+  including any process it re-execs into, so Store-Python / `.cmd` / `npx` / Electron launchers
+  work — waits for its first window, yields an owned handle, and tears it down modal-safely even
+  when the check fails. Getting from "app is open" to the specific screen under test is ordinary
+  per-check fixture code; there is deliberately no navigation DSL. If you genuinely cannot reach
+  the state under test, that is an abstention — do not assert against whatever screen you happened
+  to land on.
 
 ## The workflow
 
@@ -74,6 +79,59 @@ writing checks; do not assume signatures from memory or from any sketch in the p
 
 Writing the checks before implementing is normal and expected. They will fail. That is the point
 — a check that has never been seen to fail has not been shown to check anything.
+
+#### The API you actually call
+
+A map, not a substitute — read the real signatures and docstrings in `src/cyclaudes/pytest_ui.py`
+(the fixtures) and `src/cyclaudes/ui.py` (the driver and helpers). Everything imports from
+`cyclaudes`:
+
+- **`app_session` fixture** — `@pytest.mark.app_session(cmd, *, title_contains=, app=, title=, ready_timeout=, ready_poll=, timeout=, poll=, scratch_arg=)`. Launches `cmd` (str or list, as `subprocess.Popen` takes it) in a fresh temp cwd, owns it, waits for its first window, yields an owned `WindowHandle`, and tears it down (graceful modal-safe close, then force-kill, then scratch cleanup) no matter how the check ends. The default for a self-contained check.
+- **`window` fixture** — `@pytest.mark.window(app=, title=, title_contains=, pid=)`. Attaches to an *already-open* window; no launch, no teardown. Use only when the app is a given the check does not own.
+- **`ui.wait_until_ready(handle, *, signal=, timeout=, poll=)`** — block until the window is genuinely ready, then return the handle. Pass `signal=` — an element name, or a `(handle) -> bool` predicate — to gate on **real content**, not merely a non-empty tree. Required for lazy web UIs (see gotchas).
+- **`ui.assert_owned(handle_or_pid)`** — hard-assert ownership before acting; returns the pid.
+- **`ui.reset_to_known_state(handle, reset)`** — run your app-specific `reset(handle)` callable, then wait until ready, so one check's leftovers can't bleed into the next.
+- **`WindowHandle`** — all reads/asserts re-read the live tree: reads `exists`, `read_text`, `states`, `title`; assertions `assert_text`, `assert_state`, `assert_not_state`, `assert_exists`, `assert_gone`; actions `click`, `set_value`, `close` (each re-verifies from a fresh snapshot — never trust the action's own return value, rule 1). Elements are addressed by **name/role**, never by cached IDs (rule 2).
+
+#### A worked check, end to end
+
+The launch → warm → assert → automatic-teardown flow (this is the real LLT Import UI run, a
+pywebview/WebView2 app, that passed green):
+
+```python
+import pytest
+from cyclaudes import ui
+
+@pytest.mark.app_session(
+    ["python", r"C:\...\Ladder-Logic-Translator-LLT\ui\app.py", r"C:\...\TOY.txt"],
+    title_contains="LLT Import",   # resolve OUR owned window — never a stray title match (rule 3)
+    ready_timeout=40,              # WebView2 cold start is slow
+)
+def test_import_ui_shows_loaded_source(app_session):
+    # WebView2's a11y tree is lazy — warm it until real content is present; don't assert cold:
+    ui.wait_until_ready(app_session, signal="Assemble import set", timeout=40)
+
+    # Post-conditions, declared before the code, asserted against a fresh read:
+    assert app_session.exists("Assemble import set", role="button")
+    assert app_session.exists("TOY.txt")                  # loaded-file name is a text node
+    assert not app_session.exists("Import set: 5 files")  # nothing assembled yet — must be false
+    # teardown (modal-safe close, force-kill fallback, scratch cleanup) runs automatically.
+```
+
+#### Gotchas the live desktop will hit you with
+
+- **Lazy web UIs (WebView2/Chromium, pywebview, Electron).** The accessibility tree is built on
+  demand: the first read right after launch is empty `landmark` wrappers with no DOM, so a bare
+  assertion **false-abstains**. Always `wait_until_ready(win, signal="<a real element>")` before
+  asserting. Once warmed the whole DOM is there; loaded text (a filename, a status) is a `text`
+  node that `exists` / `read_text` see.
+- **Re-exec'ing launchers are handled for you.** `python` (the Windows Store shim), `.cmd`/`.bat`,
+  `npx`, Java, and Electron helpers re-exec the real process as a child; `app_session` owns that
+  child by process ancestry, so you launch with the normal command and it still resolves *your*
+  window rather than refusing it or grabbing a pre-existing one.
+- **Install / run.** `pip install git+https://github.com/CameronCrow/Cyclaudes.git` yields a
+  runnable verifier (pytest and touchpoint come with it); a check is a plain pytest test, run with
+  `python -m pytest`. Live checks that drive a real desktop are marked and deselected by default.
 
 ### Step 3 — Implement.
 
