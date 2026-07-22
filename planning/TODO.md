@@ -112,9 +112,9 @@ Tightly coupled; best done by **one agent**, not fanned out.
       repo-relative path to `.cyclaudes/pending-ui/<session_id>.json` per the frozen
       schema (`planning/PHASE_3.md`) the Stop hook (issue #32) reads. No-op on a
       non-UI path; never blocks the tool call. `tests/test_flag_ui_change.py`)
-- [ ] Loop integration: pass → continue; fail → actionable diff + self-correct; abstain →
+- [x] Loop integration: pass → continue; fail → actionable diff + self-correct; abstain →
       escalate with specifics
-- [ ] Bounded retry — cap correct→verify cycles, escalate on exhaustion
+- [x] Bounded retry — cap correct→verify cycles, escalate on exhaustion
 - [ ] Success criterion: a full issue resolution completes with zero Cameron input
 
 ## Phase 4 — Vision fallback → Phase 3

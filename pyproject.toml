@@ -15,6 +15,11 @@ dependencies = ["touchpoint-py>=0.3.0", "pytest>=8.0"]
 cyclaudes = "cyclaudes.pytest_plugin"
 cyclaudes_ui = "cyclaudes.pytest_ui"
 
+# `cyclaudes verify` records verify-result/<session_id>.json when UI checks run
+# (Phase 3, deliverable B) — the input the Stop-gate hook routes on.
+[project.scripts]
+cyclaudes = "cyclaudes.verify_result:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
