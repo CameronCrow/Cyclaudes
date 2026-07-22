@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from cyclaudes import pytest_ui, ui
+from cyclaudes import ancestry, pytest_ui, ui
 
 FAST = dict(timeout=0.25, poll=0.01)
 
@@ -242,6 +242,112 @@ class TestTeardown:
         drv._close_all()  # window vanished before teardown
         pytest_ui._modal_safe_close(win, ui)  # must not raise
         assert drv.wins == []
+
+
+# ---------------------------------------------------------------------------
+# Subtree-aware force-kill: reap the re-exec'd child + helper swarm (issue #29)
+# ---------------------------------------------------------------------------
+
+
+class TestDescendantWalk:
+    """The pure ``ancestry._descendants_from_table`` walk the force-kill leans on.
+
+    Exercised directly against a fake ``{pid: parent_pid}`` table (no real
+    snapshot), so the "who counts as a descendant" logic that decides which
+    PIDs the teardown may kill is pinned down in isolation.
+    """
+
+    def test_gathers_children_and_grandchildren(self):
+        # 100 -> 101 -> 102 -> 103: the re-exec'd child and its helper depth.
+        table = {101: 100, 102: 101, 103: 102}
+        assert ancestry._descendants_from_table(100, table) == {101, 102, 103}
+
+    def test_excludes_the_root_itself(self):
+        # The launched PID is killed through its Popen handle, not this set.
+        assert 100 not in ancestry._descendants_from_table(100, {101: 100})
+
+    def test_a_sibling_subtree_is_excluded(self):
+        # 200 -> 201 is a separate tree; walking from 100 must never reach it.
+        assert ancestry._descendants_from_table(100, {101: 100, 201: 200}) == {101}
+
+    def test_a_cyclic_table_does_not_hang_or_over_collect(self):
+        # PID reuse can make a table look cyclic (100 <-> 101); the seen-set
+        # must break the loop and still return a finite descendant set.
+        assert ancestry._descendants_from_table(100, {101: 100, 100: 101}) == {101}
+
+
+class TestSubtreeForceKill:
+    """Issue #29: the force-kill last resort must reap the whole subtree.
+
+    Mirrors ``test_ui.TestSubtreeOwnership``'s fake-process-tree style. The
+    per-PID kill and the descendant lookup are both stubbed, so no real process
+    is ever launched or signalled. Where it matters (the negative test), the
+    descendant lookup runs the *real* walk over a fake table, so "an unrelated
+    PID is not a descendant" is decided by production logic, not the stub.
+    """
+
+    def _fake_process_tree(self, monkeypatch, table, killed):
+        monkeypatch.setattr(
+            pytest_ui.ancestry, "descendant_pids",
+            lambda pid: ancestry._descendants_from_table(pid, table),
+        )
+        monkeypatch.setattr(pytest_ui.os, "kill", lambda pid, sig: killed.add(pid))
+
+    def test_kills_the_launched_pid_and_every_descendant(self, monkeypatch):
+        # launched 100 -> re-exec'd child 101 -> grandchild helper 102.
+        killed = set()
+        self._fake_process_tree(monkeypatch, {101: 100, 102: 101}, killed)
+        proc = FakeProc(pid=100)
+
+        pytest_ui._ensure_process_dead(proc)
+
+        assert proc.killed           # the launched PID, via its Popen handle
+        assert killed == {101, 102}  # child + grandchild, terminated by PID
+
+    def test_an_unrelated_pid_is_not_killed(self, monkeypatch):
+        # 999 is present in the table but roots at un-owned 500, not our 100.
+        # This is the most important guarantee: the reach never spills over.
+        killed = set()
+        self._fake_process_tree(monkeypatch, {101: 100, 999: 500}, killed)
+        proc = FakeProc(pid=100)
+
+        pytest_ui._ensure_process_dead(proc)
+
+        assert 101 in killed      # our genuine descendant reaped
+        assert 999 not in killed  # the unrelated PID left untouched
+
+    def test_one_kill_that_raises_does_not_stop_the_others(self, monkeypatch):
+        # Best-effort per PID: a permission/race failure on one descendant must
+        # neither propagate out of the finalizer nor skip the remaining PIDs.
+        killed = set()
+
+        def _kill(pid, sig):
+            if pid == 101:
+                raise PermissionError("access denied")
+            killed.add(pid)
+
+        monkeypatch.setattr(
+            pytest_ui.ancestry, "descendant_pids", lambda pid: {101, 102, 103})
+        monkeypatch.setattr(pytest_ui.os, "kill", _kill)
+        proc = FakeProc(pid=100)
+
+        pytest_ui._ensure_process_dead(proc)  # must not raise
+
+        assert proc.killed          # the launched PID still reaped
+        assert killed == {102, 103}  # 101 raised; the rest still died
+
+    def test_never_raises_even_if_the_subtree_lookup_raises(self, monkeypatch):
+        # If the snapshot itself blows up we still kill the root and stay silent
+        # — the finalizer contract is absolute.
+        def _boom(pid):
+            raise OSError("snapshot failed")
+
+        monkeypatch.setattr(pytest_ui.ancestry, "descendant_pids", _boom)
+        proc = FakeProc(pid=100)
+
+        pytest_ui._ensure_process_dead(proc)  # must not raise
+
+        assert proc.killed  # falls back to killing the launched PID alone
 
 
 # ---------------------------------------------------------------------------

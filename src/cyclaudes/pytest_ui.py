@@ -57,12 +57,16 @@ that makes an empty tree / vanished window *abstain* rather than fail lives in
 
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
 
 import pytest
+
+from . import ancestry
 
 #: How long to wait for the launched process's first window before giving up.
 #: Apps can be slow to paint their first frame, and a full window enumeration
@@ -231,14 +235,50 @@ def _modal_safe_close(win, ui) -> None:
             pass  # still stuck — the force-kill last resort will handle it
 
 
+def _kill_pid(pid: int) -> None:
+    """Best-effort terminate one bare descendant PID. Never raises.
+
+    ``subprocess.Popen.kill()`` only reaches the process we launched; a
+    re-exec'd child and its helper/renderer swarm are plain PIDs with no
+    ``Popen`` handle, so they are terminated by number. On Windows
+    ``os.kill(pid, signal.SIGTERM)`` maps to ``TerminateProcess`` (POSIX sends
+    the signal), which is enough for the no-residue guarantee. Every failure —
+    the PID already exited, a race, a permission error — is swallowed, because
+    this runs inside the fixture finalizer's force-kill and one unkillable PID
+    must never stop the others or propagate out.
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:
+        pass
+
+
 def _ensure_process_dead(proc, *, kill_timeout=DEFAULT_KILL_TIMEOUT) -> None:
-    """Force-kill the process if it is still alive. The no-residue guarantee.
+    """Force-kill the process **and its whole subtree**. The no-residue guarantee.
 
     The last resort behind every teardown path: whatever happened with the
-    window, we launched this process so we make certain it is gone. Purely
-    defensive — it never raises, so it can run from a finalizer no matter how
-    the check or the graceful close ended.
+    window, we launched this process so we make certain nothing it spawned
+    survives. ``proc.kill()`` alone would only reach the launched PID, but
+    issue #23 established that on Windows ``python`` (and ``.cmd``/``.bat``,
+    ``npx``, Java, Electron launchers) re-execs the real process as a *child* —
+    the window and its WebView2/Chromium helper-process swarm live in that
+    child subtree. Killing only the parent would orphan all of it, breaking the
+    guarantee for exactly the app class #23 taught us to support (issue #29).
+
+    So the descendant set is gathered **first**, from a single process-table
+    snapshot (:func:`ancestry.descendant_pids`), *before* anything is killed —
+    killing the root first would sever the links needed to enumerate the
+    subtree, and taking one snapshot up front also means only genuine
+    descendants in that snapshot are ever touched, never an unrelated PID that
+    reused a number. Then the launched process is killed through its ``Popen``
+    handle and each descendant by PID. Purely defensive throughout — every OS
+    call is best-effort and nothing raises, so it can run from a finalizer no
+    matter how the check or the graceful close ended.
     """
+    try:
+        descendants = ancestry.descendant_pids(proc.pid)
+    except Exception:
+        descendants = set()  # can't enumerate the subtree — still kill the root
     try:
         if proc.poll() is None:
             proc.kill()
@@ -248,6 +288,8 @@ def _ensure_process_dead(proc, *, kill_timeout=DEFAULT_KILL_TIMEOUT) -> None:
                 pass
     except Exception:
         pass
+    for pid in descendants:
+        _kill_pid(pid)
 
 
 def _teardown_session(proc, win, ui) -> None:
