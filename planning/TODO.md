@@ -105,9 +105,9 @@ Tightly coupled; best done by **one agent**, not fanned out.
 - [ ] Plugin packaging
 - [ ] Criteria capture at implement-time (post-conditions written before the change)
 - [ ] Trigger + cheap relevance test (don't verify non-UI changes)
-- [ ] Loop integration: pass → continue; fail → actionable diff + self-correct; abstain →
+- [x] Loop integration: pass → continue; fail → actionable diff + self-correct; abstain →
       escalate with specifics
-- [ ] Bounded retry — cap correct→verify cycles, escalate on exhaustion
+- [x] Bounded retry — cap correct→verify cycles, escalate on exhaustion
 - [ ] Success criterion: a full issue resolution completes with zero Cameron input
 
 ## Phase 4 — Vision fallback → Phase 3
