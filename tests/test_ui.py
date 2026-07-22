@@ -621,6 +621,113 @@ class TestOwnership:
         win.read_text("Text editor")  # no UnownedWindow
 
 
+# ---------------------------------------------------------------------------
+# Subtree-aware ownership (Phase 2F, issue #23): a re-exec'ing launcher (the
+# Windows App Execution Alias shim being the concrete case — `python` re-execs
+# the real interpreter as a CHILD process) means the window we need to attach
+# to often does not carry the PID we launched. Owning a launched PID must also
+# own its descendants' windows — but ancestry only ever WIDENS what counts as
+# ours; a PID that is not actually a descendant of anything we own must still
+# be refused exactly as before. That negative case is the one that matters.
+# ---------------------------------------------------------------------------
+
+
+class TestSubtreeOwnership:
+    def _fake_tree(self, monkeypatch, parents: dict):
+        """Stub ancestry.parent_pid against a fake {pid: parent_pid} process tree.
+
+        Only the pids named in *parents* have a known parent; anything else
+        (an unrelated process, or the root of a chain) reports ``None`` —
+        exactly like the real Windows implementation when a PID has no
+        further ancestry to report.
+        """
+        monkeypatch.setattr(ui._ancestry, "parent_pid", lambda pid: parents.get(pid))
+
+    def test_direct_child_is_owned(self, monkeypatch):
+        # owned parent (100) -> re-exec'd child (101): the exact shim shape.
+        self._fake_tree(monkeypatch, {101: 100})
+        ui.own(100)
+        assert ui.is_owned(101)
+
+    def test_grandchild_is_owned(self, monkeypatch):
+        # owned parent (100) -> child (101) -> grandchild (102): proves the
+        # walk goes more than one hop, not just the immediate child.
+        self._fake_tree(monkeypatch, {101: 100, 102: 101})
+        ui.own(100)
+        assert ui.is_owned(102)
+
+    def test_descendant_window_resolves_through_owned_window(self, fake, monkeypatch):
+        self._fake_tree(monkeypatch, {101: 100, 102: 101})
+        fake.wins = [FakeWindow(id="w:grandchild", title="App", app="App", pid=102)]
+        ui.own(100)  # we only ever launched the parent PID
+
+        win = ui.owned_window(app="App", **FAST)
+        assert win.pid == 102
+
+    def test_unrelated_pid_is_still_refused(self, fake, monkeypatch):
+        # 200 has NO ancestry link to anything owned at all.
+        self._fake_tree(monkeypatch, {})
+        fake.wins = [
+            FakeWindow(id="w:mine", title="Mine", app="App", pid=100),
+            FakeWindow(id="w:unrelated", title="Unrelated", app="App", pid=200),
+        ]
+        ui.own(100)
+
+        assert not ui.is_owned(200)
+        with pytest.raises(ui.UnownedWindow) as exc:
+            ui.owned_window(title="Unrelated", **FAST)
+        assert "Unrelated" in str(exc.value)
+        assert "200" in str(exc.value)
+
+    def test_sibling_subtree_is_still_refused(self, fake, monkeypatch):
+        # 201 has a REAL ancestry chain, but it roots at a DIFFERENT,
+        # un-owned PID (999) — a sibling subtree. Having *some* ancestry must
+        # not be enough; it has to chain up to something we actually own.
+        self._fake_tree(monkeypatch, {201: 999})
+        fake.wins = [
+            FakeWindow(id="w:mine", title="Mine", app="App", pid=100),
+            FakeWindow(id="w:sibling", title="Sibling", app="App", pid=201),
+        ]
+        ui.own(100)
+
+        assert not ui.is_owned(201)
+        with pytest.raises(ui.UnownedWindow) as exc:
+            ui.owned_window(title="Sibling", **FAST)
+        assert "Sibling" in str(exc.value)
+
+    def test_ancestry_lookup_failure_refuses_rather_than_owns(self, monkeypatch):
+        # A raising lookup must read as "can't tell", never "assume owned".
+        def _boom(pid):
+            raise OSError("process ancestry unavailable")
+
+        monkeypatch.setattr(ui._ancestry, "parent_pid", _boom)
+        ui.own(100)
+        assert not ui.is_owned(101)
+
+    def test_unbounded_chain_does_not_hang_or_resolve_to_owned(self, monkeypatch):
+        # A chain that never reaches an owned pid (and never repeats) must
+        # stop at _MAX_ANCESTRY_DEPTH and refuse, not spin forever.
+        monkeypatch.setattr(ui._ancestry, "parent_pid", lambda pid: pid + 1)
+        ui.own(100)
+        assert not ui.is_owned(1)
+
+    def test_owned_window_resolves_by_ownership_alone_no_criteria(self, fake, monkeypatch):
+        # Mirrors what pytest_ui._wait_for_first_window does post-#23: own the
+        # launched PID, then resolve with no app/title/pid criterion at all —
+        # ownership scope alone still finds the re-exec'd child's window.
+        self._fake_tree(monkeypatch, {2222: 1111})
+        fake.wins = [FakeWindow(id="w:1", title="App", app="App", pid=2222)]
+        with ui.owning(1111):
+            win = ui.owned_window(**FAST)
+        assert win.pid == 2222
+
+    def test_exact_pid_ownership_still_works_unchanged(self, monkeypatch):
+        # No ancestry at all needed for the direct-match case (#12 baseline).
+        self._fake_tree(monkeypatch, {})
+        ui.own(100)
+        assert ui.is_owned(100)
+
+
 class TestOwnedLiveness:
     """Issue #11: owned-window liveness must not pay a full windows() walk."""
 

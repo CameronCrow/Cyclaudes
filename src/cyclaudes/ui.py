@@ -53,8 +53,25 @@ an *unowned* window raises :class:`UnownedWindow` (naming it) rather than
 resolving to it, an empty owned set raises :class:`NoOwnedWindows` rather
 than falling back to the whole desktop, and an owned :class:`WindowHandle`
 re-checks ownership on every read and action so it cannot outlive its claim.
-Ownership is pure PID-set membership — no titles, roles, or platform state
-are involved — so it carries over unchanged to macOS PID semantics (Phase 5).
+Ownership is pure PID-set membership plus process ancestry — no titles,
+roles, or platform state are involved — so it carries over unchanged to
+macOS PID semantics (Phase 5).
+
+Subtree-aware ownership (Phase 2F, issue #23): a launched PID's window is not
+always the window whose PID :func:`subprocess.Popen` returned. On Windows,
+``python`` resolves through the Store App Execution Alias shim
+(``WindowsApps/python.exe``), which re-execs the real interpreter as a
+*child* process — the window belongs to that child PID, never the shim PID
+we launched. The same shape recurs for any re-exec'ing launcher
+(``.cmd``/``.bat`` wrappers, ``npx``, Java launchers, Electron helper
+processes). So ``is_owned`` (and everything built on it) also accepts a PID
+that *descends* from an owned PID via process ancestry, walked through the
+small :mod:`cyclaudes.ancestry` seam (Windows now via ``ctypes`` Toolhelp32;
+macOS in Phase 5). This only ever *widens* what counts as ours, never
+narrows the refusal: a PID whose ancestry does not chain up to an owned PID
+— or whose ancestry cannot be determined at all — is still refused with
+:class:`UnownedWindow`, exactly as before. "Don't know" is treated as "not a
+descendant", never as "assume owned".
 
 Abstention seam: this module does not define ``CannotVerify`` (issue #1
 owns it). Instead, :data:`ABSTENTION_CONDITIONS` lists the exception types
@@ -73,6 +90,8 @@ from collections.abc import Iterator
 from typing import NamedTuple
 
 import touchpoint as _tp  # tests replace ui._tp with a fake; keep all calls on this alias
+
+from . import ancestry as _ancestry  # tests stub _ancestry.parent_pid with a fake process tree
 
 __all__ = [
     "ABSTENTION_CONDITIONS",
@@ -315,9 +334,56 @@ def disown(pid: int) -> None:
     _owned_pids.discard(int(pid))
 
 
+#: Max hops walked up a PID's parent chain when checking ownership by
+#: ancestry. Bounded so a corrupt or PID-reuse-induced cyclic-looking chain
+#: can never spin the walk; a genuine launcher re-exec chain is a handful of
+#: hops at most, so this is generous without being unbounded.
+_MAX_ANCESTRY_DEPTH = 64
+
+
+def _is_descendant_of_owned(pid: int) -> bool:
+    """Whether ``pid`` descends from an owned PID via process ancestry.
+
+    Walks parent PIDs one hop at a time through :func:`ancestry.parent_pid`
+    (the seam macOS will implement separately in Phase 5), checking each hop
+    against the owned set. Bounded and cycle-safe: a chain longer than
+    :data:`_MAX_ANCESTRY_DEPTH`, a PID repeated in the walk (ancestry can look
+    cyclic after PID reuse), a lookup that cannot determine a parent
+    (``parent_pid`` returning ``None``), or the lookup itself raising, all
+    just stop the walk with "not a descendant" — they never count as a match.
+    (``ancestry.parent_pid`` documents itself as never raising, but this
+    walker does not rely on that promise being kept by every implementation
+    or every test stub.) Erring toward refusal is the point: this generalizes
+    the exact safety guarantee :class:`UnownedWindow` exists for, so "don't
+    know" must never resolve to "owned".
+    """
+    seen = {pid}
+    current = pid
+    for _ in range(_MAX_ANCESTRY_DEPTH):
+        try:
+            parent = _ancestry.parent_pid(current)
+        except Exception:
+            return False
+        if not parent or parent in seen:
+            return False
+        if parent in _owned_pids:
+            return True
+        seen.add(parent)
+        current = parent
+    return False
+
+
 def is_owned(pid: int) -> bool:
-    """Whether ``pid`` is currently in the owned set."""
-    return int(pid) in _owned_pids
+    """Whether ``pid`` is owned outright, or descends from an owned PID.
+
+    Exact membership is checked first — the common case, and the only one
+    that costs no OS call. Ancestry (issue #23) is checked only if that
+    misses, so owning a launched PID also owns windows belonging to any
+    process it re-exec'd into or spawned, without weakening the refusal for
+    anything that is not actually a descendant of something we own.
+    """
+    pid = int(pid)
+    return pid in _owned_pids or _is_descendant_of_owned(pid)
 
 
 def owned_pids() -> frozenset[int]:
@@ -367,7 +433,7 @@ def owned_windows() -> list[OwnedWindow]:
     return [
         OwnedWindow(str(w.app), str(w.title), w.pid)
         for w in _tp.windows()
-        if w.pid in _owned_pids
+        if is_owned(w.pid)
     ]
 
 
@@ -382,11 +448,24 @@ def owned_window(
 ) -> "WindowHandle":
     """Resolve exactly one **owned** window, or raise. The safe Phase-2 surface.
 
-    Same strict matching as :func:`window`, but the candidate pool is scoped
-    to owned PIDs *before* anything is chosen, so an unowned window can never
-    be resolved. A criteria match that only hits an unowned window raises
-    :class:`UnownedWindow` (naming it) instead of silently missing — that is
-    the exact smoke-test footgun made loud.
+    Same strict matching as :func:`window` for whichever criteria are given,
+    but the candidate pool is scoped to owned PIDs *before* anything is
+    chosen, so an unowned window can never be resolved. A criteria match that
+    only hits an unowned window raises :class:`UnownedWindow` (naming it)
+    instead of silently missing — that is the exact smoke-test footgun made
+    loud. "Owned" here includes process ancestry (issue #23, see
+    :func:`is_owned`): a window whose PID descends from an owned PID (a
+    re-exec'ing launcher's child, say) resolves exactly like one whose PID
+    was owned directly.
+
+    Unlike :func:`window`, giving **no** criteria at all is allowed here:
+    ownership is itself the filter — never the whole desktop — so "resolve
+    the window I own" is not an arbitrary pick. It still raises
+    :class:`AmbiguousWindow` if more than one owned window is open, and
+    :class:`NoOwnedWindows` if nothing is owned. This is what lets a launcher
+    (issue #23's ``app_session``) resolve a re-exec'd child's window by
+    ownership alone, without forcing an exact ``pid=`` match that a window
+    belonging to a *descendant* PID could never satisfy.
 
     Raises:
         NoOwnedWindows: the owned set is empty.
@@ -394,13 +473,7 @@ def owned_window(
         WindowNotFound: nothing matched among owned windows.
         AmbiguousWindow: several owned windows matched.
         EmptyTree: the platform reported no windows at all.
-        ValueError: no criteria given.
     """
-    if app is None and title is None and title_contains is None and pid is None:
-        raise ValueError(
-            "owned_window() needs at least one of app=, title=, title_contains=, "
-            "pid= — refusing to pick a window arbitrarily"
-        )
     if not _owned_pids:
         raise NoOwnedWindows(
             "owned_window() called with an empty owned set — refusing to "
@@ -417,12 +490,12 @@ def owned_window(
             "that everything is fine."
         )
 
-    criteria = _criteria_str(app, title, title_contains, pid)
+    criteria = _criteria_str(app, title, title_contains, pid) or "no criteria — ownership alone"
     matched = [w for w in wins if _matches_window(w, app, title, title_contains, pid)]
-    owned_matched = [w for w in matched if w.pid in _owned_pids]
+    owned_matched = [w for w in matched if is_owned(w.pid)]
 
     if not owned_matched:
-        unowned = [w for w in matched if w.pid not in _owned_pids]
+        unowned = [w for w in matched if not is_owned(w.pid)]
         if unowned:
             listing = "\n  ".join(_describe_window(w) for w in unowned)
             raise UnownedWindow(
@@ -431,7 +504,7 @@ def owned_window(
                 f"refusing to touch a window we did not open:\n  {listing}\n"
                 f"If this process really is ours, own() its PID first."
             )
-        owned_open = [w for w in wins if w.pid in _owned_pids]
+        owned_open = [w for w in wins if is_owned(w.pid)]
         listing = "\n  ".join(_describe_window(w) for w in owned_open) or "<none open>"
         raise WindowNotFound(
             f"No owned window matches ({criteria}). Owned windows currently "
@@ -581,10 +654,11 @@ class WindowHandle:
         A no-op for unscoped handles. For owned handles this is the guarantee
         that a handle can never outlive its claim: once :func:`disown` (or a
         fixture teardown) drops the PID, every further read and action raises
-        rather than acting on a window the layer no longer owns. Pure set
-        membership — no enumeration, no titles, portable to macOS PIDs.
+        rather than acting on a window the layer no longer owns. Built on
+        :func:`is_owned`, so it is set membership plus process ancestry — no
+        enumeration, no titles — portable to macOS PID semantics.
         """
-        if self._owned and self.pid not in _owned_pids:
+        if self._owned and not is_owned(self.pid):
             raise UnownedWindow(
                 f"window (app={self.app!r}, pid={self.pid}) is no longer owned "
                 f"(owned={sorted(_owned_pids)}); refusing to act on it. The "
