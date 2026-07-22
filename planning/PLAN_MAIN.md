@@ -5,9 +5,8 @@ up: "[[Cyclaudes]]"
 ---
 # Planning
 
-**Status:** Scoped (2026-07-20). The four open questions are answered, prior art is swept, the
-closest existing tool is smoke-tested, and [[Repos/Cyclaudes/planning/PHASE_1|PHASE_1]] is written.
-Ready to implement.
+**Status:** Phases 1 & 2 built and green (2026-07-22); not yet dogfooded on a real project — that
+validation is the current priority. See Current State below.
 
 ## Problem
 
@@ -79,12 +78,18 @@ The ordering is deliberate: **the trigger comes last.** A trigger that fires unr
 verification is worse than no trigger — it converts a visible stall into an invisible false pass.
 Phases 1–2 exist to earn the right to fire automatically.
 
-## Current State (2026-07-20 — Phase 1 COMPLETE, `main` is green)
+## Current State (2026-07-22 — Phases 1 & 2 built and green; NOT YET dogfooded)
 
-**Phase 1 is done.** 72 tests pass under bare `python -m pytest` (plus 4 `live` tests deselected by
-default); CI runs the suite on every PR (`.github/workflows/tests.yml`, Windows-only for now).
+**Phases 1 and 2 are built, unit/acceptance-tested, and now dogfooded on a real project.** The
+first real-project dogfood (2026-07-22, against the LLT Import UI — a pywebview/WebView2 app)
+validated Phase 1 end-to-end and surfaced two Phase-2 gaps, both since fixed (see Dogfood results).
 
-Landed:
+Phase 1 (the verification contract) and Phase 2 (driving the app) both merged to `main`; CI runs
+the suite on every PR (`.github/workflows/tests.yml`, Windows-only for now). Also packaged as an
+installable plugin (`/plugin install cyclaudes@cyclaudes`) with the touchpoint MCP bundled, and a
+one-command engine install (`pip install git+https://github.com/CameronCrow/Cyclaudes.git`).
+
+Phase 1 landed:
 - `src/cyclaudes/ui.py` — discipline layer over touchpoint (#2, PR #9). Actions return `None`
   unconditionally, name-only API, own window/element matching ladder that raises on ambiguity.
 - `src/cyclaudes/abstain.py` + `pytest_plugin.py` — `CannotVerify` with its own pytest outcome
@@ -95,12 +100,44 @@ Landed:
 - `tests/test_success_criterion_2.py` / `_3.py` — no-false-pass (#6) and abstention-is-never-
   success (#7), both driven through the real discipline layer.
 
+Phase 2 landed (issues #12–#16, PRs #17–#22):
+- PID-scoped window ownership — never touch/enumerate a window we did not launch; ambiguity raises
+  (#12). The single most important deliverable.
+- `app_session` fixture with modal-safe teardown + force-kill fallback (#13).
+- Scratch workspace isolation — throwaway temp working dir, can't mutate real user files (#15).
+- Precondition helpers `assert_owned` / `wait_until_ready` / `reset_to_known_state` (#14).
+- Acceptance suite proving the suite runs beside real apps and touches none (#16).
+
+### Dogfood results (2026-07-22 — first real-project contact, LLT Import UI)
+
+Target: `Ladder-Logic-Translator-LLT/ui/app.py`, a **pywebview / WebView2** app (HTML/JS in an
+embedded Edge Chromium window, not native Win32) — deliberately the hard case.
+
+- **Phase 1 VALIDATED end-to-end.** A live probe through the unowned `window` fixture asserted real
+  post-conditions against the WebView2 DOM (action button present, loaded `TOY.txt` text node read,
+  `"No import set yet"` empty-state) — all passed — and a deliberately false claim **FAILED** (not
+  passed, not abstained). No-false-pass held on a live app; cyclaudes reads text nodes, not just
+  interactive elements. Whole run 4.16s. The fast-verification premise holds on real web UIs.
+- **Phase 2 had two gaps, both now FIXED and merged:**
+  - **Subtree-aware ownership (#23, PR #26).** `app_session` owned by `Popen(...).pid`, but Windows
+    Store `python` is an App-Execution-Alias shim that re-execs the real interpreter as a *child* —
+    the window belongs to the child PID, so `app_session` false-refused its own app
+    (`AppSessionError`). Fixed: `is_owned` now accepts a PID descending from an owned PID (process
+    ancestry via a new `ancestry.py` ctypes seam), strictly ancestry-scoped so unrelated/sibling
+    PIDs are still refused. Generalizes to `.cmd`/`.bat`/`npx`/Java/Electron launchers.
+  - **Content-aware `wait_until_ready` (#24, PR #25).** WebView2's a11y tree is lazy — the first
+    read after launch is empty `landmark` wrappers, so the first assertion would false-abstain.
+    Fixed: `wait_until_ready(signal=...)` gates on real DOM content (element name or predicate),
+    polled fresh, backward-compatible, still abstains honestly at the deadline.
+
 ### Next action
 
-**Start Phase 2 (driving the app).** Its highest-value first task is PID-scoped window ownership
-(`planning/PHASE_2.md`) — refuse to enumerate/act on windows we did not launch. The Notepad live
-test's launch/teardown fixture is throwaway Phase-1 scaffolding; Phase 2 replaces it with the
-reusable, teardown-guaranteed `app_session` fixture.
+**Re-run the full end-to-end `app_session` dogfood on LLT now that #23/#24 have landed** — the
+earlier probe deliberately used the unowned `window` fixture to isolate Phase 1 from the launch
+bug; the fixes should now let `app_session` launch the LLT UI itself, warm the lazy tree via
+`wait_until_ready(signal=...)`, assert, and tear down. Once that closes green, the core three
+phases are proven on a real app and Phase 3 (the autonomous trigger) is unblocked. Open issue #20
+(migrate the stale Phase-1 live check off tabbed Notepad → mspaint) is related cleanup.
 
 ### The two live-UI findings — RESOLVED (2026-07-20)
 
