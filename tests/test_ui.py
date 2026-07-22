@@ -851,6 +851,79 @@ class TestWaitUntilReady:
             ui.wait_until_ready(win)
         assert type(exc.value) not in ui.ABSTENTION_CONDITIONS
 
+    # -- issue #24: content-aware readiness (lazy WebView2/Chromium tree) --
+
+    def test_no_signal_treats_landmark_only_tree_as_ready_unchanged(self, fake):
+        # Backward compatibility: with no signal, "ready" is exactly what it
+        # was before this parameter existed — non-empty, even if the only
+        # thing in the tree is a content-less landmark wrapper.
+        fake.wins = [FakeWindow(id="w:1", title="X", app="App", pid=99)]
+        fake.trees["w:1"] = [{"name": "", "role": "landmark", "states": []}]
+        ui.own(99)
+        win = ui.owned_window(app="App", **FAST)
+        assert ui.wait_until_ready(win) is win
+
+    def test_signal_blocks_past_landmark_only_tree_until_content_appears(self, notepad):
+        # The real defect: WebView2/Chromium's a11y tree is lazy. The first
+        # reads return only landmark wrappers + chrome (non-empty, but
+        # nothing assertable); only after several reads does the real DOM
+        # populate. A bare non-empty check would return on the first look and
+        # be wrong; a content signal must keep polling until it actually
+        # shows up.
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", timeout=1.0, poll=0.01)
+        real_tree = notepad.trees["w:1"]
+        notepad.trees["w:1"] = [{"name": "", "role": "landmark", "states": []}]
+        orig_elements = notepad.elements
+        calls = {"n": 0}
+
+        def delayed(window_id=None, **kwargs):
+            calls["n"] += 1
+            if calls["n"] >= 5 and window_id == "w:1":
+                notepad.trees["w:1"] = real_tree  # content finally renders
+            return orig_elements(window_id=window_id, **kwargs)
+
+        notepad.elements = delayed
+        assert ui.wait_until_ready(win, signal="Save") is win
+        assert calls["n"] >= 5  # blocked past the cold, landmark-only polls
+
+    def test_signal_abstains_at_deadline_when_content_never_appears(self, notepad):
+        # Never-ready-with-content must abstain (EmptyTree), not fail, and
+        # not be confused with the tree-was-actually-empty case.
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        notepad.trees["w:1"] = [{"name": "", "role": "landmark", "states": []}]
+        with pytest.raises(ui.EmptyTree) as exc:
+            ui.wait_until_ready(win, signal="Save")
+        assert type(exc.value) in ui.ABSTENTION_CONDITIONS
+        assert not isinstance(exc.value, AssertionError)
+        assert "Save" in str(exc.value)
+
+    def test_signal_accepts_a_callable_predicate_evaluated_fresh_each_poll(self, notepad):
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", timeout=1.0, poll=0.01)
+        seen = {"n": 0}
+
+        def ready_after_a_few_looks(handle):
+            seen["n"] += 1  # only ever incremented by a *fresh* poll, never cached
+            return seen["n"] >= 3
+
+        assert ui.wait_until_ready(win, signal=ready_after_a_few_looks) is win
+        assert seen["n"] >= 3
+
+    def test_signal_predicate_raising_unowned_window_propagates_immediately(self, notepad):
+        # Same safety/abstention split as the base loop: if the caller's own
+        # predicate raises UnownedWindow, it must never be swallowed into a
+        # retry or read as "not ready yet".
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+
+        def boom(handle):
+            raise ui.UnownedWindow("predicate says no")
+
+        with pytest.raises(ui.UnownedWindow):
+            ui.wait_until_ready(win, signal=boom)
+
 
 class TestResetToKnownState:
     def test_runs_reset_then_returns_a_ready_handle(self, notepad):
