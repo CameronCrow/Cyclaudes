@@ -53,13 +53,104 @@ being quietly swallowed or rationalised into passes, stop and fix that before pr
 3. A change that breaks the UI is caught by the trigger, not by Cameron noticing later.
 4. Non-UI changes are not slowed down measurably.
 
-## Open questions
+## Implementation design (scoped 2026-07-22)
 
-- Hook vs skill vs both — depends on what Claude Code plugins can actually fire on. Confirm the
-  supported trigger points before committing to a shape.
-- Where do captured criteria live — alongside the code as durable regression tests (preferred), or
-  as ephemeral per-task artifacts?
-- How does the agent decide a change is "UI-affecting" cheaply and reliably?
+Trigger points were confirmed against the Claude Code hooks contract (a `claude-code-guide`
+research pass): the deterministic shape this phase needs **is** supported.
+
+### Mechanism
+
+- **`PostToolUse` hook** (matcher `Edit|Write`) receives `tool_input.file_path`. If the path
+  matches this repo's UI globs, it records the file in a session-scoped state file. Cheap,
+  deterministic, and free on non-UI changes — this is the relevance test (deliverable 3).
+- **`Stop` hook** reads that state on every turn-end. If UI files were touched and are not yet
+  covered by a passing verification, it returns `{"decision":"block","reason":…}` — Claude gets
+  the reason and keeps working (deliverable 4). Once verification has run with a pass-or-abstain
+  outcome covering the touched files, the gate is satisfied and the agent may stop.
+
+Both ship in the plugin at `hooks/hooks.json` (`${CLAUDE_PLUGIN_ROOT}`-relative scripts).
+
+### Hook-contract facts that constrain the design (do not violate)
+
+- **`Stop` fires on every turn end, not only at task completion**, and there is an **8-consecutive-
+  block cap** after which Claude Code overrides the hook and lets the agent stop. The gate must
+  therefore be idempotent and cheap to satisfy, and must read `stop_hook_active` to detect
+  re-entry — never nag a turn with nothing to verify, never burn the block budget.
+- **`Stop`/`PostToolUse` cannot inject `additionalContext`** (only `UserPromptSubmit` can). The
+  Stop hook's only channel to the model is the block `reason`; the fail-diff and the abstain
+  escalation both travel through that one field.
+- Hooks communicate via stdin JSON / stdout JSON / exit codes only; they cannot call a `/skill`
+  directly (they can run a shell command / `python -m pytest`).
+
+### FROZEN INTERFACE — the contract issues build against in parallel
+
+State lives under `<project>/.cyclaudes/` (git-ignored), keyed by `session_id`. **Do not change
+these shapes without updating this section first** — A and B are built in parallel against them.
+
+**`pending-ui/<session_id>.json`** — written by the PostToolUse hook, read by the Stop hook:
+
+```json
+{ "session_id": "…", "ui_touched": ["relpath/one.tsx", "relpath/two.xaml"] }
+```
+
+`ui_touched` is the de-duplicated set of UI-glob-matching files edited this session.
+
+**`verify-result/<session_id>.json`** — written when UI verification runs, read by the Stop hook:
+
+```json
+{ "session_id": "…", "outcome": "pass|fail|abstain",
+  "covered": ["relpath/one.tsx"], "detail": "expected-vs-actual, or the abstain reason",
+  "at": "<iso8601>" }
+```
+
+**Stop-gate decision (the load-bearing rule):**
+
+- UI touched, no matching `verify-result` yet → **block**; reason names the files to verify.
+- `outcome == "fail"` → **block**; reason = the `detail` expected-vs-actual, so the agent self-corrects.
+- `outcome == "pass"` (covering the touched set) → **allow**.
+- `outcome == "abstain"` → **allow, AND surface the abstain `detail` to the user**. Abstain is a
+  legitimate stopping point that escalates, **not** a reason to keep blocking. Getting this wrong
+  makes an unverifiable change thrash into the 8-block cap and then false-pass anyway — this is the
+  single most important correctness rule in the phase.
+
+The gate is satisfied only when `covered` covers `ui_touched`; a later edit to a new UI file
+re-opens it.
+
+### Decomposition (issues)
+
+- **A — relevance detector + session state (PostToolUse).** The `Edit|Write` hook, the per-repo
+  UI-glob config, writing `pending-ui/<session_id>.json` per the frozen schema, and the
+  `.cyclaudes/` gitignore. Touches `hooks/` + `hooks.json` + `.gitignore` only.
+- **B — Stop-gate + three-outcome routing + bounded retry + instrumentation.** The Stop hook
+  (idempotent, `stop_hook_active`-aware, 8-block-cap-safe), the decision rules above, the retry
+  cap, pass/fail/abstain audit counters, and the mechanism that writes
+  `verify-result/<session_id>.json` when UI checks run (a small addition to the cyclaudes pytest
+  plugin, or a thin `cyclaudes verify` wrapper). Reads the frozen schema A writes. Touches
+  `hooks/` (Stop script) + `hooks.json` + `src/cyclaudes/` (result-writer).
+- **C — end-to-end acceptance (deferred until A + B land).** One full unattended UI
+  issue-resolution cycle — implement → trigger fires → verify → self-correct → re-verify — with
+  zero human input, dogfooded on a real LLT UI change; plus the guard tests: a non-UI change does
+  **not** fire, and an abstain escalates rather than thrashing.
+
+A and B build in parallel against the frozen interface (they collide only on `hooks.json`, a
+trivial rebase). C is last by construction.
+
+## Open questions — resolved during scoping (2026-07-22)
+
+- **Hook vs skill vs both → resolved:** hooks for deterministic firing (`PostToolUse` + `Stop`),
+  the `verify-ui` skill for the actual verification work the block triggers. Trigger points
+  confirmed supported (above).
+- **Where captured criteria live → resolved:** durable regression tests in the repo's test tree
+  (the `verify-ui` skill already writes them there), so the phase's output compounds into a
+  growing UI regression suite rather than evaporating per task.
+- **How to decide "UI-affecting" cheaply → resolved:** a file-glob relevance test on the edited
+  path in the `PostToolUse` hook (per-repo globs); the model's judgment can be a second gate,
+  never the only one.
+
+Still genuinely open (settle during build):
+- Exactly who writes `verify-result` — a cyclaudes pytest-plugin addition vs. a `cyclaudes verify`
+  CLI wrapper (issue B decides, behind the frozen file contract).
+- Default UI-glob set and how a repo overrides it.
 
 ## Related
 

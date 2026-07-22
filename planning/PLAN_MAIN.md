@@ -130,14 +130,23 @@ embedded Edge Chromium window, not native Win32) — deliberately the hard case.
     Fixed: `wait_until_ready(signal=...)` gates on real DOM content (element name or predicate),
     polled fresh, backward-compatible, still abstains honestly at the deadline.
 
-### Next action
+### Current status — Phase 3 in progress (scoped 2026-07-22)
 
-**Re-run the full end-to-end `app_session` dogfood on LLT now that #23/#24 have landed** — the
-earlier probe deliberately used the unowned `window` fixture to isolate Phase 1 from the launch
-bug; the fixes should now let `app_session` launch the LLT UI itself, warm the lazy tree via
-`wait_until_ready(signal=...)`, assert, and tear down. Once that closes green, the core three
-phases are proven on a real app and Phase 3 (the autonomous trigger) is unblocked. Open issue #20
-(migrate the stale Phase-1 live check off tabbed Notepad → mspaint) is related cleanup.
+The full end-to-end `app_session` dogfood on LLT **passed green** — the fixture launched the LLT
+UI itself (through the Store-Python re-exec), warmed the lazy tree with `wait_until_ready(signal=…)`,
+asserted real post-conditions, and tore down cleanly. The one gap it surfaced — teardown's
+force-kill reaching only the launched PID, so a re-exec'd child could orphan on a blocked close —
+is fixed (#29). So the core three phases' first two are proven on a real app, and **Phase 3 (the
+autonomous trigger) is now underway.**
+
+Phase 3 is scoped in `planning/PHASE_3.md` (Implementation design): a `PostToolUse` hook flags
+UI-affecting edits, a `Stop` hook blocks completion until verification has run (pass/abstain
+satisfies the gate; fail re-blocks with the diff; abstain escalates rather than thrashing). Trigger
+points were confirmed against the Claude Code hooks contract. Decomposed into issues **A** (relevance
+detector + session state), **B** (Stop-gate + routing + retry + instrumentation), and **C** (end-to-end
+acceptance, deferred until A+B land); A and B build in parallel against a frozen state/decision
+interface. Open issue #20 (migrate the stale Phase-1 live check off tabbed Notepad → mspaint) is
+unrelated cleanup.
 
 ### The two live-UI findings — RESOLVED (2026-07-20)
 
