@@ -151,9 +151,18 @@ def _wait_for_first_window(proc, ui, *, criteria, ready_timeout, ready_poll,
                            handle_timeout, handle_poll):
     """Poll until the launched process shows an owned window; resolve and return it.
 
-    Resolution is PID-scoped (``ui.owned_window(pid=proc.pid, ...)``), so a
-    pre-existing unrelated window can never be grabbed — the exact smoke-test
-    footgun. ``WindowNotFound`` / ``EmptyTree`` just mean "not up yet" and are
+    Resolution is ownership-scoped (``ui.owned_window(...)`` against the PID
+    :func:`ui.owning` just claimed), so a pre-existing unrelated window can
+    never be grabbed — the exact smoke-test footgun. Deliberately does **not**
+    pass ``pid=proc.pid`` as a match criterion (issue #23): on Windows,
+    ``python`` (and any other re-exec'ing launcher — ``.cmd``/``.bat``,
+    ``npx``, Java, Electron helpers) resolves through a shim that re-execs the
+    real process as a *child*, so the window that appears belongs to a PID
+    that is never equal to ``proc.pid`` — an exact ``pid=`` match would refuse
+    it forever. Ownership scoping alone is enough: :func:`ui.is_owned` now
+    also accepts any PID descending from an owned one via process ancestry, so
+    the re-exec'd child's window resolves as ours without naming its PID up
+    front. ``WindowNotFound`` / ``EmptyTree`` just mean "not up yet" and are
     retried until the deadline; a process that exits before painting a window,
     or a window that never appears, raises :class:`AppSessionError` so the
     failure is loud (and the fixture's force-kill finalizer still fires).
@@ -167,15 +176,13 @@ def _wait_for_first_window(proc, ui, *, criteria, ready_timeout, ready_poll,
                 f"a window appeared — nothing to attach to."
             )
         try:
-            return ui.owned_window(
-                pid=proc.pid, timeout=handle_timeout, poll=handle_poll, **criteria
-            )
+            return ui.owned_window(timeout=handle_timeout, poll=handle_poll, **criteria)
         except (ui.WindowNotFound, ui.EmptyTree):
             pass  # not up yet — keep waiting
         if time.monotonic() >= deadline:
             raise AppSessionError(
                 f"launched process (pid={proc.pid}) showed no owned window within "
-                f"{ready_timeout:.1f}s (criteria={criteria or 'pid only'})."
+                f"{ready_timeout:.1f}s (criteria={criteria or 'none — ownership alone'})."
             )
         time.sleep(ready_poll)
 
