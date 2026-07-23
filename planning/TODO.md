@@ -34,9 +34,11 @@ Tightly coupled; best done by **one agent**, not fanned out.
 - [x] `verify-ui` skill — declare post-conditions before implementing; abstain rather than guess
       (`skills/verify-ui/SKILL.md`)
 - [x] Port the Notepad round-trip into the first committed check → `ui.py`, fixtures
-      (`tests/test_notepad_live.py`, marked `live`; ran green 3x — round-trip,
-      opaque states, right-window-among-several, modal-on-close asserted
-      structurally, clean dismissal)
+      (originally `tests/test_notepad_live.py`; migrated to `tests/test_mspaint_live.py`
+      (issue #20) once current Win11's single-process *tabbed* Notepad proved
+      unownable by PID-scoped ownership (#12) — ran green on mspaint: tool-selection
+      round-trip, opaque states (the live `checked,pressed` vocabulary), right-window-
+      among-several, modal-on-close asserted structurally, clean dismissal)
 - [x] Success criterion 2: deliberately broken change → check fails (no false pass)
       (`tests/test_success_criterion_2.py`: 5 broken cases incl. the OK-but-
       silently-failed close, each → pytest fail/exit 1, never abstention)

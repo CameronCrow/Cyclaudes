@@ -147,8 +147,9 @@ points were confirmed against the Claude Code hooks contract. Decomposed into is
 detector + session state), **B** (Stop-gate + routing + retry + instrumentation), and **C** (end-to-end
 acceptance, deferred until A+B land — now landed: `tests/test_acceptance_phase3.py` proves one full
 unattended cycle plus the non-UI, abstain-never-thrashes, and fail/bounded-retry guards); A and B
-build in parallel against a frozen state/decision interface. Open issue #20 (migrate the stale Phase-1 live check off tabbed Notepad → mspaint) is
-unrelated cleanup.
+build in parallel against a frozen state/decision interface. Issue #20 (migrate the stale Phase-1
+live check off tabbed Notepad → mspaint) is resolved: `tests/test_notepad_live.py` is replaced by
+`tests/test_mspaint_live.py`, unrelated cleanup to the trigger work above.
 
 ### Phase 4 BUILT (2026-07-23)
 

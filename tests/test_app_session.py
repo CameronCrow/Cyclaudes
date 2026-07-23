@@ -16,8 +16,8 @@ Teardown is the whole point, so it is what these tests hammer:
   during the check lands *inside* it (path containment, not eyeballing), and
   the directory is gone after teardown on pass, fail, **and** error.
 
-The live test at the bottom (deselected by default, like ``test_notepad_live``)
-launches real Notepad through ``app_session`` and leans on teardown to clean up.
+The live test at the bottom (deselected by default, like ``test_mspaint_live``)
+launches real mspaint through ``app_session`` and leans on teardown to clean up.
 """
 
 from __future__ import annotations
