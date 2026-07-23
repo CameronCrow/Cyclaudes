@@ -25,11 +25,12 @@ So abstention is a first-class result, never quietly reported as success.
 
 | Piece | What it is | Install |
 |---|---|---|
-| **Plugin** | The `verify-ui` skill (how to author UI checks), a **PostToolUse** hook that flags UI-affecting edits, a **Stop** hook that blocks "done" until verification ran, and the **touchpoint** MCP (structural UI tools for interactive use). | `/plugin install` |
-| **Engine** | The pytest-based verification engine — **a UI check *is* a pytest test** — plus the `cyclaudes verify` CLI the Stop-gate points at. | `pip install` |
+| **Plugin** | The `verify-ui` skill (how to author UI checks), a **PostToolUse** hook that flags UI-affecting edits, a **Stop** hook that blocks "done" until verification ran, the **touchpoint** MCP (structural UI tools for interactive use), and a **SessionStart** hook that bootstraps the engine. | `/plugin install` |
+| **Engine** | The pytest-based verification engine — **a UI check *is* a pytest test** — plus the `cyclaudes verify` CLI the Stop-gate points at, and the `touchpoint-py`/`pytest` deps. | auto-installed by the plugin on first session (or `pip install`) |
 
-The hooks are stdlib-only, so the trigger fires from the plugin alone; the engine is what
-actually *runs* the checks.
+The trigger and skill hooks are stdlib-only, so they fire from the plugin alone; the engine is
+what actually *runs* the checks, and the SessionStart hook installs it into the `python` on your
+`PATH` the first time.
 
 ## Requirements
 
@@ -40,17 +41,23 @@ actually *runs* the checks.
 
 ## Install
 
-**1. The engine** (gives you `touchpoint`, the `cyclaudes` package, and the `cyclaudes` CLI):
-
-```
-pip install git+https://github.com/CameronCrow/Cyclaudes.git
-```
-
-**2. The plugin:**
+**Just install the plugin:**
 
 ```
 /plugin marketplace add CameronCrow/Cyclaudes
 /plugin install cyclaudes@cyclaudes
+```
+
+On its first session, the plugin's `SessionStart` hook auto-installs the engine (the
+`cyclaudes` package + `touchpoint-py` + `pytest`) into the `python` on your `PATH` — so
+there's nothing else to do. That first install takes a bit; later sessions are a fast
+no-op. It's idempotent and fail-safe: if it can't install (no network, locked-down env),
+it prints the exact manual command and never breaks your session.
+
+**Manual fallback** (or if you'd rather control the environment yourself):
+
+```
+pip install git+https://github.com/CameronCrow/Cyclaudes.git
 ```
 
 ## How the autonomous loop works
