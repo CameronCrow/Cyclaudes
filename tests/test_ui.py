@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import pytest
+from touchpoint.core.exceptions import BackendUnavailableError, TouchpointError
 
 from cyclaudes import ui
 
@@ -57,12 +58,27 @@ class FakeTouchpoint:
     - ``set_value`` / ``close_window`` can be configured to *lie*: return
       truthy success while changing nothing (the observed
       ``close_window: OK``-while-blocked failure).
+    - ``elements(source="dom")`` models touchpoint's CDP DOM-walk path
+      (issue #37): it serves ``dom_trees`` (the *actual DOM*, distinct from the
+      a11y ``trees``), or — when ``dom_raises`` is set — raises the real
+      ``TouchpointError``/``BackendUnavailableError`` a non-CDP target produces.
     """
+
+    #: The real touchpoint base exception, so ``ui._dom_snapshot`` can do a
+    #: precise ``except _tp.TouchpointError`` against the fake standing in for
+    #: the module. (Matches how the real module exposes it as ``tp.*``.)
+    TouchpointError = TouchpointError
+    BackendUnavailableError = BackendUnavailableError
 
     def __init__(self):
         self.wins: list[FakeWindow] = []
         # window_id -> list of element spec dicts (name/role/raw_role/states/value)
         self.trees: dict[str, list[dict]] = {}
+        # window_id -> DOM-walk spec dicts (the *real DOM*, source="dom").
+        self.dom_trees: dict[str, list[dict]] = {}
+        # When set, a source="dom" read raises this instead of returning — the
+        # not-CDP-backed / no-CDP-backend case touchpoint raises for.
+        self.dom_raises: Exception | None = None
         self.generation = 0
         self.issued_ids: set[str] = set()
         self._live: dict[str, dict] = {}  # latest-snapshot id -> spec
@@ -79,7 +95,34 @@ class FakeTouchpoint:
         self.windows_calls += 1
         return list(self.wins)
 
-    def elements(self, window_id=None, **kwargs):
+    def elements(self, window_id=None, source="full", **kwargs):
+        # DOM-walk path (issue #37): source="dom" reads the *actual DOM*, a
+        # different tree from the a11y projection, and on a non-CDP target
+        # touchpoint raises TouchpointError rather than returning.
+        if source == "dom":
+            if self.dom_raises is not None:
+                raise self.dom_raises
+            if window_id not in {w.id for w in self.wins}:
+                return []
+            self.generation += 1
+            self._live = {}
+            out = []
+            for i, spec in enumerate(self.dom_trees.get(window_id, [])):
+                el_id = f"cdp:9222:t1:dom:{self.generation * 100 + i},0"
+                self.issued_ids.add(el_id)
+                self._live[el_id] = spec
+                out.append(
+                    FakeElement(
+                        id=el_id,
+                        name=spec.get("name", ""),
+                        role=spec.get("role", "unknown"),
+                        raw_role=spec.get("raw_role", ""),
+                        states=list(spec.get("states", [])),
+                        value=spec.get("value"),
+                    )
+                )
+            return out
+
         # Real touchpoint: a scoped read on a window that no longer exists
         # comes back empty (verified live 2026-07-20). The fake must match, or
         # it would report a live tree for a dead window and mask WindowGone.
@@ -949,3 +992,123 @@ class TestResetToKnownState:
 
         with pytest.raises(ui.EmptyTree):
             ui.reset_to_known_state(win, wipe)
+
+
+# ---------------------------------------------------------------------------
+# Issue #37: DOM-read path (read_dom_text) — reads the actual DOM, abstains
+# cleanly (never false-passes) when the target isn't a readable CDP-backed DOM
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def react_app(fake):
+    """A Chromium/Electron-style app with a *thin a11y tree* but a rich DOM.
+
+    Mirrors the #37 gap: the a11y projection (``trees``) is role-less div-soup
+    with no names to assert on, while the real DOM (``dom_trees``) carries the
+    rendered text. The window id is a ``cdp:`` id, the shape touchpoint's window
+    merge hands out for a CDP-backed app.
+    """
+    fake.wins = [FakeWindow(id="cdp:9222:t1", title="My React App", app="Electron", pid=7000)]
+    # a11y tree: unnamed generic containers — nothing a name query can bind to.
+    fake.trees["cdp:9222:t1"] = [
+        {"name": "", "role": "section", "raw_role": "generic", "states": ["visible"]},
+        {"name": "", "role": "section", "raw_role": "generic", "states": ["visible"]},
+    ]
+    # actual DOM: role-less <div>s whose text the a11y tree omits.
+    fake.dom_trees["cdp:9222:t1"] = [
+        {"name": "Total: 42", "role": "section", "raw_role": "div",
+         "states": ["visible"], "value": "Total: 42"},
+        {"name": "Checkout", "role": "button", "raw_role": "div",
+         "states": ["visible", "enabled"], "value": "Checkout"},
+    ]
+    return fake
+
+
+class TestDomRead:
+    def test_reads_dom_text_a_thin_ax_tree_omits(self, react_app):
+        ui.own(7000)
+        win = ui.owned_window(app="Electron", **FAST)
+        # The a11y path cannot see it — this is exactly the #37 gap.
+        with pytest.raises(ui.ElementNotFound):
+            win.read_text("Total")
+        # The DOM path reads the real rendered content.
+        assert win.read_dom_text("Total") == "Total: 42"
+        assert win.read_dom_text("Checkout") == "Checkout"
+
+    def test_abstains_when_touchpoint_raises_touchpointerror(self, react_app):
+        # Not a CDP app: touchpoint raises its own base error; we abstain.
+        react_app.dom_raises = TouchpointError("source='dom' is only supported for CDP apps")
+        ui.own(7000)
+        win = ui.owned_window(app="Electron", **FAST)
+        with pytest.raises(ui.DomUnavailable):
+            win.read_dom_text("Total")
+
+    def test_abstains_when_cdp_backend_unavailable(self, react_app):
+        # websocket-client missing entirely — BackendUnavailableError (a
+        # TouchpointError subclass). Still an abstention, never a pass.
+        react_app.dom_raises = BackendUnavailableError(
+            backend="cdp", reason="source='dom' requires a CDP backend"
+        )
+        ui.own(7000)
+        win = ui.owned_window(app="Electron", **FAST)
+        with pytest.raises(ui.DomUnavailable):
+            win.read_dom_text("Total")
+
+    def test_abstains_on_empty_dom_walk(self, fake):
+        # A native (non-CDP) window: the DOM walk returns nothing. Must abstain,
+        # not silently succeed or read something misleading.
+        fake.wins = [FakeWindow(id="w:1", title="Native", app="Notepad", pid=4242)]
+        fake.trees["w:1"] = [{"name": "Save", "role": "button", "states": ["enabled"]}]
+        # no dom_trees entry -> empty DOM walk
+        ui.own(4242)
+        win = ui.owned_window(app="Notepad", **FAST)
+        with pytest.raises(ui.DomUnavailable):
+            win.read_dom_text("Save")
+
+    def test_missing_query_in_readable_dom_is_not_found_not_abstention(self, react_app):
+        # DOM is readable but the queried element is genuinely absent: that is a
+        # real "not there" (ElementNotFound), NOT an abstention — same as the
+        # a11y read_text. A false abstention would hide a real missing element.
+        ui.own(7000)
+        win = ui.owned_window(app="Electron", **FAST)
+        with pytest.raises(ui.ElementNotFound) as exc:
+            win.read_dom_text("Nonexistent widget")
+        assert not isinstance(exc.value, ui.DomUnavailable)
+
+    def test_ambiguous_dom_match_raises_never_guesses(self, react_app):
+        react_app.dom_trees["cdp:9222:t1"] = [
+            {"name": "Item", "role": "section", "value": "Item one"},
+            {"name": "Item", "role": "section", "value": "Item two"},
+        ]
+        ui.own(7000)
+        win = ui.owned_window(app="Electron", **FAST)
+        with pytest.raises(ui.AmbiguousElement):
+            win.read_dom_text("Item")
+
+    def test_reads_fresh_every_call(self, react_app):
+        ui.own(7000)
+        win = ui.owned_window(app="Electron", **FAST)
+        assert win.read_dom_text("Total") == "Total: 42"
+        # The live DOM changed (React re-rendered); a fresh walk must reflect it,
+        # nothing cached across calls.
+        react_app.dom_trees["cdp:9222:t1"][0]["value"] = "Total: 99"
+        react_app.dom_trees["cdp:9222:t1"][0]["name"] = "Total: 99"
+        assert win.read_dom_text("Total") == "Total: 99"
+
+    def test_rechecks_ownership_and_refuses_after_disown(self, react_app):
+        ui.own(7000)
+        win = ui.owned_window(app="Electron", **FAST)
+        assert win.read_dom_text("Total") == "Total: 42"
+        ui.disown(7000)
+        # Ownership is a safety error, NOT an abstention — must fail loudly.
+        with pytest.raises(ui.UnownedWindow):
+            win.read_dom_text("Total")
+
+    def test_domunavailable_is_registered_as_an_abstention(self):
+        from cyclaudes import abstain
+
+        assert ui.DomUnavailable in ui.ABSTENTION_CONDITIONS
+        assert ui.DomUnavailable in abstain.abstention_types()
+        # Never catchable as an ordinary assertion failure.
+        assert not issubclass(ui.DomUnavailable, AssertionError)
