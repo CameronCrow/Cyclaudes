@@ -102,10 +102,23 @@ Tightly coupled; best done by **one agent**, not fanned out.
 
 ## Phase 3 — The autonomous trigger → Phase 2
 
-- [ ] Confirm what trigger points Claude Code plugins actually support *(spike; do first — it
+- [x] Confirm what trigger points Claude Code plugins actually support *(spike; do first — it
       constrains everything else in this phase)*
-- [ ] Plugin packaging
+      (Confirmed against the plugins reference: `PostToolUse` + `Stop` are valid hook events; a
+      plugin ships them via `hooks/hooks.json` auto-discovered at the plugin root, with
+      `${CLAUDE_PLUGIN_ROOT}`-relative `command`s; `skills/` and inline `mcpServers` compose in the
+      same plugin. The shipped `flag_ui_change.py`/`stop_gate.py` scripts were smoke-tested via
+      stdin exactly as Claude Code invokes them — flag writes pending-ui, non-UI is skipped, Stop
+      blocks with no result and allows with a covering pass.)
+- [x] Plugin packaging
+      (`.claude-plugin/plugin.json` completed: metadata + explicit `hooks`/`skills` + inline
+      touchpoint `mcpServers`; `.claude-plugin/marketplace.json` describes the full plugin;
+      `hooks/hooks.json` wires PostToolUse+Stop with `${CLAUDE_PLUGIN_ROOT}`; README rewritten as a
+      real two-runtime install/usage guide (plugin + `pip install` engine). Hooks are stdlib-only,
+      so the trigger fires from the plugin alone; the engine runs the checks.)
 - [ ] Criteria capture at implement-time (post-conditions written before the change)
+      (Embodied as Step 1 of the `verify-ui` skill — declare post-conditions before implementing —
+      but not yet an *enforced* mechanism; left unchecked until it's more than a workflow convention.)
 - [x] Trigger + cheap relevance test (don't verify non-UI changes)
       (`hooks/flag_ui_change.py` + `hooks/hooks.json`: `PostToolUse` hook, matcher
       `Edit|Write`, matches `tool_input.file_path` against a per-repo UI-glob set

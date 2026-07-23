@@ -1,11 +1,24 @@
 {
   "name": "cyclaudes",
+  "displayName": "Cyclaudes",
+  "description": "Structural UI verification for the autonomous loop: the agent drives a real desktop app through the accessibility tree, asserts post-conditions, and honestly abstains rather than false-pass. A Stop-gate blocks \"done\" until UI changes are actually verified.",
   "version": "0.1.0",
-  "description": "Structural UI verification for the autonomous loop: the agent drives a real desktop app through the accessibility tree, asserts post-conditions, and honestly abstains rather than false-pass.",
   "author": {
     "name": "Cameron Crow",
     "url": "https://github.com/CameronCrow"
   },
+  "homepage": "https://github.com/CameronCrow/Cyclaudes",
+  "repository": "https://github.com/CameronCrow/Cyclaudes",
+  "keywords": [
+    "ui-testing",
+    "verification",
+    "accessibility",
+    "automation",
+    "hooks",
+    "windows"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills/",
   "mcpServers": {
     "touchpoint": {
       "type": "stdio",

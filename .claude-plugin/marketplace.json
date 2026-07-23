@@ -9,9 +9,10 @@
   "plugins": [
     {
       "name": "cyclaudes",
-      "description": "Ships the verify-ui skill: declare UI post-conditions before implementing, drive the real app via touchpoint, assert pass/fail/abstain.",
+      "description": "Structural UI verification for the autonomous loop: the verify-ui skill, a PostToolUse hook that flags UI edits, a Stop-gate that blocks \"done\" until they're verified, and the touchpoint MCP. Drive a real app, assert pass/fail/abstain. Requires the pip engine (see README).",
       "source": "./",
-      "category": "testing"
+      "category": "testing",
+      "keywords": ["ui-testing", "verification", "accessibility", "hooks", "windows"]
     }
   ]
 }
