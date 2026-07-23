@@ -101,6 +101,7 @@ __all__ = [
     "ActionNotVerified",
     "AmbiguousElement",
     "AmbiguousWindow",
+    "DomUnavailable",
     "ElementNotFound",
     "EmptyTree",
     "NoOwnedWindows",
@@ -194,6 +195,28 @@ class EmptyTree(UIError):
     """
 
 
+class DomUnavailable(UIError):
+    """A DOM-level read was requested but the target isn't a readable Chromium DOM.
+
+    The DOM-read path (``read_dom_text``) closes the React/div-soup gap
+    (issue #37) by walking the *actual DOM* through touchpoint's CDP seam,
+    which sees content a thin accessibility tree omits. That only works for a
+    Chromium/Electron/WebView2 window this layer owns **and** that was launched
+    with ``--remote-debugging-port`` — so touchpoint can attach a CDP session.
+
+    When that precondition isn't met — no CDP backend (``websocket-client``
+    absent, or the app has no debugging port, so the window is a native UIA
+    window), or the live DOM walk comes back empty — there is nothing to read.
+    That is a distinct *abstention* condition, not a pass and not a failure:
+    "I could not read the DOM here" must never read as "the content is fine".
+    Hence this is in :data:`ABSTENTION_CONDITIONS` and, like the others, is
+    **not** an :class:`AssertionError` subclass, so a broad ``except
+    AssertionError`` can't swallow it. The honest fallbacks are: launch the app
+    with remote debugging (so the DOM becomes readable), or add ARIA
+    roles/``data-testid`` hooks so the a11y-tree path can see the content.
+    """
+
+
 class ActionNotVerified(UIError):
     """An action was dispatched but its effect never appeared in the tree.
 
@@ -210,7 +233,7 @@ class UIAssertionError(UIError, AssertionError):
 #: "this check failed". The pytest layer (issue #1) maps these onto its
 #: abstention outcome (``CannotVerify``); this module deliberately does not
 #: define that type itself.
-ABSTENTION_CONDITIONS: tuple[type[UIError], ...] = (EmptyTree, WindowGone)
+ABSTENTION_CONDITIONS: tuple[type[UIError], ...] = (EmptyTree, WindowGone, DomUnavailable)
 
 # Wire the seam (issue #3): tell the abstention plugin to treat these as
 # abstentions, so an empty tree or a vanished window surfaces as "cannot
@@ -784,13 +807,23 @@ class WindowHandle:
         )
 
     def _resolve(self, query: str, *, role: str | None = None):
-        """Resolve a name query against a fresh snapshot; raise rather than guess.
+        """Resolve a name query against a fresh AX snapshot; raise rather than guess.
 
         Match rule: exact name, else unique case-insensitive exact, else
         unique case-insensitive substring. More than one candidate at the
         deciding stage raises :class:`AmbiguousElement`.
         """
-        els = self._snapshot()
+        return self._match(self._snapshot(), query, role=role)
+
+    def _match(self, els, query: str, *, role: str | None = None):
+        """Bind ``query`` to exactly one element in ``els`` or raise.
+
+        The pure matching core shared by the AX path (:meth:`_resolve`, fed by
+        :meth:`_snapshot`) and the DOM path (:meth:`read_dom_text`, fed by
+        :meth:`_dom_snapshot`), so both apply *identical* exact→case-insensitive
+        →substring resolution and the same never-guess ambiguity behaviour
+        regardless of which tree the elements came from.
+        """
         pool = [el for el in els if role is None or _role_matches(el, role)]
 
         exact = [el for el in pool if el.name == query]
@@ -871,9 +904,94 @@ class WindowHandle:
             text = el.value if el.value is not None else ""
         return str(text)
 
+    def _dom_snapshot(self):
+        """A fresh live-DOM walk of this window, or abstain if it isn't readable.
+
+        The DOM-read counterpart of :meth:`_snapshot` (issue #37). Where
+        ``_snapshot`` reads the accessibility *projection*, this reads the
+        **actual DOM** through touchpoint's ``source="dom"`` CDP path, which
+        exposes role-less div-soup content (unlabeled ``<div>`` text, custom
+        widgets, shadow DOM) that a thin React a11y tree omits.
+
+        It only works for a Chromium/Electron/WebView2 window this layer owns
+        that was started with ``--remote-debugging-port`` (so touchpoint can
+        attach a CDP session and the merged window carries a ``cdp:`` id). When
+        that precondition isn't met, this **abstains** with
+        :class:`DomUnavailable` — it never falls back to a native read that
+        might look like content. Two shapes of "not readable" both abstain:
+
+        * touchpoint raises ``TouchpointError`` (its base type;
+          ``BackendUnavailableError`` — no CDP backend at all — is a subclass);
+        * the DOM walk returns *empty* — a native UIA window (no debugging
+          port), a genuinely blank page, or a window that has since vanished.
+
+        Ownership is re-checked first, exactly like every other read, so a
+        disowned handle raises :class:`UnownedWindow` (a safety error, not an
+        abstention) before any DOM work happens.
+        """
+        self._check_owned()
+        try:
+            els = _tp.elements(window_id=self._window_id, source="dom")
+        except _tp.TouchpointError as exc:
+            # Precise catch: touchpoint's own base exception, raised when the
+            # target is not a CDP-backed app / has no CDP backend. Not a
+            # blanket except — a genuine bug must still surface as a bug.
+            raise DomUnavailable(
+                f"Cannot read the DOM of window (app={self.app!r}, "
+                f"pid={self.pid}): {type(exc).__name__}: {exc}. The DOM-read "
+                f"path needs a Chromium/Electron/WebView2 target launched with "
+                f"--remote-debugging-port. Either launch it that way, or add "
+                f"ARIA roles/data-testid hooks so the accessibility-tree path "
+                f"can see the content. This is not a pass."
+            ) from exc
+        if els:
+            return els
+        raise DomUnavailable(
+            f"The live-DOM walk of window (app={self.app!r}, pid={self.pid}) "
+            f"returned nothing. This usually means the app is not CDP-backed "
+            f"(a native window with no --remote-debugging-port), the page is "
+            f"blank, or the window has closed — either way there is no DOM to "
+            f"assert on. Launch the app with remote debugging, or add "
+            f"ARIA/data-testid hooks for the a11y-tree path. Not a pass."
+        )
+
     def states(self, query: str, *, role: str | None = None) -> tuple[str, ...]:
         """The element's current states as opaque strings, read fresh."""
         return _states_of(self._resolve(query, role=role))
+
+    def read_dom_text(self, query: str, *, role: str | None = None) -> str:
+        """The element's DOM text/value, read fresh from a live-DOM walk (issue #37).
+
+        The DOM-read counterpart of :meth:`read_text`. Use it when the app is a
+        role-sparse React/div-soup Chromium UI whose accessibility tree is too
+        thin to assert on: this resolves ``query`` against the **actual DOM**
+        (unlabeled ``<div>`` text, custom widgets, shadow DOM) and returns the
+        element's live ``textContent``/``value``.
+
+        Read-only and additive — it does not touch the accessibility-tree path.
+        Pair it with a plain ``assert`` at the call site; on an unreadable DOM
+        it raises :class:`DomUnavailable`, which the pytest layer surfaces as an
+        abstention (CannotVerify), never a pass. A DOM that *is* readable but
+        does not contain ``query`` raises the ordinary :class:`ElementNotFound`
+        — a real "not there", the same as :meth:`read_text`, not an abstention.
+
+        Note: unlike :meth:`assert_text`, this primitive does **not** settle or
+        retry, so a React subtree that mounts a beat late may not be present on
+        the first read. Wrap it in your own retry, or use the DOM-sourced
+        settling assertions once they land (see ``planning/REACT_ROBUSTNESS.md``,
+        slice 3).
+
+        Raises:
+            DomUnavailable: the window isn't a readable CDP-backed DOM (abstention).
+            ElementNotFound: the DOM is readable but nothing matched ``query``.
+            AmbiguousElement: more than one DOM element matched.
+            UnownedWindow: the handle's PID is no longer owned (safety error).
+        """
+        el = self._match(self._dom_snapshot(), query, role=role)
+        text = _tp.get_text_content(el)
+        if text is None:
+            text = el.value if el.value is not None else ""
+        return str(text)
 
     # -- Actions (always return None; success lives in the tree) -----------
 
