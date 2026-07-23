@@ -92,6 +92,7 @@ from typing import NamedTuple
 import touchpoint as _tp  # tests replace ui._tp with a fake; keep all calls on this alias
 
 from . import ancestry as _ancestry  # tests stub _ancestry.parent_pid with a fake process tree
+from . import windowing as _windowing  # ctypes seam for enumeration-free liveness (#36)
 
 __all__ = [
     "ABSTENTION_CONDITIONS",
@@ -110,6 +111,7 @@ __all__ = [
     "WindowGone",
     "WindowHandle",
     "WindowNotFound",
+    "any_owned_window_visible",
     "assert_owned",
     "disown",
     "is_owned",
@@ -243,6 +245,22 @@ def _val(x) -> str:
 def _states_of(el) -> tuple[str, ...]:
     """The element's states as opaque strings, exactly as the tree reports them."""
     return tuple(_val(s) for s in getattr(el, "states", ()) or ())
+
+
+def _hwnd_of(w):
+    """The native window handle touchpoint stashes in ``Window.raw``, or ``None``.
+
+    Touchpoint computes the HWND while building each ``Window`` but exposes only
+    ``id``/``app``/``pid`` on the object; the handle lives in ``raw["hwnd"]``.
+    Captured at resolve time so the cheap ctypes liveness check (#36) can ask
+    "is this exact window still alive" without re-enumerating. Absent on a
+    backend/platform that does not surface it — callers fall back to enumeration.
+    """
+    raw = getattr(w, "raw", None) or {}
+    try:
+        return raw.get("hwnd")
+    except Exception:
+        return None
 
 
 def _describe_window(w) -> str:
@@ -396,6 +414,39 @@ def reset_ownership() -> None:
     _owned_pids.clear()
 
 
+def any_owned_window_visible() -> bool | None:
+    """Cheap pre-gate: does an owned PID (or descendant) own a visible window yet?
+
+    A ctypes ``EnumWindows`` sweep (:func:`windowing.visible_window_pids`) of the
+    PIDs owning visible top-level windows, intersected with the owned set plus
+    its descendants (issue #23 ancestry, one process-table snapshot per owned
+    PID — the owned set is tiny). No UIA, so it costs ~1ms instead of the ~8s
+    ``touchpoint.windows()`` enumeration that :func:`owned_window` pays.
+
+    Returns:
+        True: at least one owned/descendant PID owns a visible window now.
+        False: none do — definitely nothing to resolve yet.
+        None: cannot be determined cheaply (non-Windows, or the ctypes read
+            failed). Callers must treat ``None`` as "do the real resolve": the
+            gate may only ever *skip provably-unnecessary* work, never hide a
+            window that is actually ready.
+
+    This is a performance gate for the ``app_session`` launch-wait loop (#36),
+    which otherwise re-enumerated on every poll while an app was still starting.
+    It is deliberately not a substitute for :func:`owned_window`'s ownership
+    reasoning — a ``True`` here still leads to the real, authoritative resolve.
+    """
+    visible = _windowing.visible_window_pids()
+    if visible is None:
+        return None
+    if not _owned_pids:
+        return False
+    targets = set(_owned_pids)
+    for pid in list(_owned_pids):
+        targets |= _ancestry.descendant_pids(pid)
+    return not visible.isdisjoint(targets)
+
+
 @contextlib.contextmanager
 def owning(pid: int) -> Iterator[int]:
     """Own ``pid`` for the duration of the block, disowning it on exit.
@@ -520,7 +571,8 @@ def owned_window(
 
     won = owned_matched[0]
     return WindowHandle(
-        won.id, app=str(won.app), pid=won.pid, owned=True, timeout=timeout, poll=poll
+        won.id, app=str(won.app), pid=won.pid, owned=True, timeout=timeout, poll=poll,
+        hwnd=_hwnd_of(won),
     )
 
 
@@ -596,7 +648,10 @@ def window(
         )
 
     won = candidates[0]
-    return WindowHandle(won.id, app=str(won.app), pid=won.pid, timeout=timeout, poll=poll)
+    return WindowHandle(
+        won.id, app=str(won.app), pid=won.pid, timeout=timeout, poll=poll,
+        hwnd=_hwnd_of(won),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +683,7 @@ class WindowHandle:
         timeout: float,
         poll: float,
         owned: bool = False,
+        hwnd=None,
     ):
         # The backend window id is an opaque private handle: never parsed,
         # never exposed. (Element ids are never even stored.)
@@ -636,6 +692,10 @@ class WindowHandle:
         self.pid = pid
         self._timeout = timeout
         self._poll = poll
+        # Native handle captured at resolve time (may be None). Used only for
+        # the cheap ctypes liveness check (#36); never parsed or exposed, and a
+        # None value just means "fall back to enumeration for liveness".
+        self._hwnd = hwnd
         # An owned handle re-checks PID ownership before every read and action
         # (see _check_owned), so it cannot be used after its process is
         # disowned. Handles from the unscoped window() are not owned and skip
@@ -676,6 +736,31 @@ class WindowHandle:
             f"it may have been closed or replaced. Re-resolve with ui.window()."
         )
 
+    def _check_liveness(self) -> None:
+        """Confirm the window still exists, cheaply — raise :class:`WindowGone` if not.
+
+        Liveness-only cousin of :meth:`_require_window` for paths that need to
+        tell "the window vanished" from "the tree is momentarily empty" but do
+        **not** need the fresh :class:`Window` object. When the native handle is
+        known (#36), a ctypes ``IsWindow`` + owning-PID check answers this in
+        sub-milliseconds and, crucially, without enumerating every top-level
+        window — so a settle loop polling a gone/empty tree no longer pays the
+        ~8s ``windows()`` walk on every iteration. If the handle is unknown, or
+        the ctypes probe can't decide (``None``), it falls back to the
+        enumeration-based :meth:`_require_window`, preserving the exact prior
+        behaviour. Ownership is re-checked first, same as every other read.
+        """
+        self._check_owned()
+        live = _windowing.window_is_live(self._hwnd, expect_pid=self.pid)
+        if live is True:
+            return
+        if live is False:
+            raise WindowGone(
+                f"Window (app={self.app!r}, pid={self.pid}) no longer exists; "
+                f"it may have been closed or replaced. Re-resolve with ui.window()."
+            )
+        self._require_window()  # handle unknown / undecidable -> enumeration fallback
+
     def _snapshot(self):
         # Hot path: one window-scoped elements() read (~50ms). We deliberately
         # do NOT call _require_window() here — that enumerates every top-level
@@ -689,7 +774,7 @@ class WindowHandle:
         els = _tp.elements(window_id=self._window_id)
         if els:
             return els
-        self._require_window()  # raises WindowGone if the window has vanished
+        self._check_liveness()  # cheap ctypes liveness (#36); raises WindowGone if vanished
         raise EmptyTree(
             f"Accessibility tree for window (app={self.app!r}, pid={self.pid}) "
             f"is empty. This usually means accessibility access is denied "

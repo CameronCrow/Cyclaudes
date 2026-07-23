@@ -177,8 +177,16 @@ class FakeDriver:
 
 
 @pytest.fixture(autouse=True)
-def _clean_ownership():
-    """Isolate the module-level owned-PID set between tests (global state)."""
+def _clean_ownership(monkeypatch):
+    """Isolate the module-level owned-PID set between tests (global state).
+
+    Also neutralizes the #36 launch-gate seam: the fake desktop's PIDs own no
+    *real* visible window, so the live ctypes ``visible_window_pids()`` would
+    gate every fake app out. Stubbing it to ``None`` selects the seam's own
+    "can't determine cheaply → do the real resolve" path, so the gate is a
+    no-op here and the fake resolve runs exactly as before it existed.
+    """
+    monkeypatch.setattr(ui._windowing, "visible_window_pids", lambda: None)
     ui.reset_ownership()
     yield
     ui.reset_ownership()
@@ -496,6 +504,10 @@ def _inner_session_module(body: str) -> str:
             proc = FakeProc()
             monkeypatch.setattr(ui, "_tp", FakeDriver(proc))
             monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: proc)
+            # #36 launch-gate seam: fake PIDs own no real visible window, so the
+            # live ctypes sweep would gate the fake app out. None => "do the real
+            # resolve", making the gate a no-op against the fake desktop.
+            monkeypatch.setattr(ui._windowing, "visible_window_pids", lambda: None)
             yield
             ui.reset_ownership()
 

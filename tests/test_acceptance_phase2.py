@@ -376,6 +376,9 @@ _SHIPPED_SUITE = textwrap.dedent(
         ui.reset_ownership()
         monkeypatch.setattr(ui, "_tp", DESKTOP)
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: DESKTOP.launch())
+        # #36 launch-gate seam: the fake desktop's PIDs own no real visible
+        # window, so None ("do the real resolve") keeps the gate a no-op here.
+        monkeypatch.setattr(ui._windowing, "visible_window_pids", lambda: None)
         yield
         ui.reset_ownership()
 

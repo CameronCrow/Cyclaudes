@@ -172,11 +172,15 @@ limitations (#36 enumeration, #37 React).
   Lead: touchpoint already carries a CDP seam (`_get_cdp`/`_is_cdp_id`) that reads the real DOM, not
   just the a11y projection — a candidate path for Chromium/Electron/WebView2 targets. Must abstain,
   never false-pass, on a UI it can't actually read.
-- **First window resolution still pays a full enumeration (#36).** `touchpoint.windows()` is ~8s on a
-  busy desktop (~30s with a UI-thread-blocked app like Logix Designer). A 2026-07-23 read-only
-  investigation found two low-risk wins: a ctypes `IsWindow`/`GetWindowThreadProcessId` liveness check
-  (the HWND touchpoint computes is currently discarded), and a ctypes `EnumWindows` gate on the
-  `app_session` launch-wait loop so it stops paying repeated enumerations every poll.
+- **Enumeration cost (#36) — addressed 2026-07-23.** `touchpoint.windows()` is ~8s on a busy desktop
+  (~30s with a UI-thread-blocked app like Logix Designer). New `src/cyclaudes/windowing.py` ctypes seam
+  removes it from two hot paths: `WindowHandle` liveness now uses `IsWindow`/`GetWindowThreadProcessId`
+  on the HWND captured at resolve time (a settle loop on a gone/empty tree no longer re-enumerates every
+  poll), and the `app_session` launch-wait gates the expensive resolve behind a pure-`ctypes` `EnumWindows`
+  sweep (`ui.any_owned_window_visible`), so it stops enumerating on every poll while an app is starting.
+  Both fail open to the old enumeration path when the ctypes probe can't decide. The *general* first-time
+  resolution cost remains (no public touchpoint path) — an upstream feature request (`find_window(pid=/hwnd=)`
+  / `ElementFromHandle`), tolerable per this plan.
 
 ### The two live-UI findings — RESOLVED (2026-07-20)
 

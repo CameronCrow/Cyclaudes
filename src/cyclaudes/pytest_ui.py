@@ -179,10 +179,16 @@ def _wait_for_first_window(proc, ui, *, criteria, ready_timeout, ready_poll,
                 f"launched process (pid={proc.pid}) exited (code {code}) before "
                 f"a window appeared — nothing to attach to."
             )
-        try:
-            return ui.owned_window(timeout=handle_timeout, poll=handle_poll, **criteria)
-        except (ui.WindowNotFound, ui.EmptyTree):
-            pass  # not up yet — keep waiting
+        # Cheap ctypes pre-gate (#36): while the app is still starting, skip the
+        # ~8s owned_window() UIA enumeration entirely until an owned/descendant
+        # PID actually owns a visible window. Only a definite False skips this
+        # round; True or "can't tell" (None) fall through to the real resolve, so
+        # the gate can never hide a window that is genuinely ready.
+        if ui.any_owned_window_visible() is not False:
+            try:
+                return ui.owned_window(timeout=handle_timeout, poll=handle_poll, **criteria)
+            except (ui.WindowNotFound, ui.EmptyTree):
+                pass  # not up yet — keep waiting
         if time.monotonic() >= deadline:
             raise AppSessionError(
                 f"launched process (pid={proc.pid}) showed no owned window within "
