@@ -79,8 +79,33 @@ Abstention discipline holds throughout: `CaptureUnavailable` / `GeometryUnavaila
 "couldn't see / couldn't measure / no baseline yet" surfaces as cannot-verify — never a false pass
 (criterion 3). The open questions (deterministic-vs-model, baseline churn, settle-before-capture) are
 answered conservatively: deterministic only, re-baseline explicit, and capture reads the current tree
-fresh each call. A live LLT dogfood is the remaining field confirmation on top of the deterministic
-acceptance suite.
+fresh each call.
+
+### Live dogfood — LLT Import UI (WebView2, 2026-07-23)
+
+Ran every vision primitive against the real LLT Import UI (pywebview / WebView2 / Chromium,
+high-DPI) — the deliberately hard embedded-web case. Result: **5 of 6 capabilities work correctly on
+the hardest surface class; occlusion abstains honestly.**
+
+- **`capture` (window + element): works** — real, non-blank pixels off WebView2 (element capture goes
+  through touchpoint's CDP screenshot path).
+- **`assert_rendered`: works** — the button region reads as painted, not flat.
+- **`assert_within_viewport`: works** — CDP elements carry usable screen geometry.
+- **`assert_matches_baseline`: works end to end** — first run creates + abstains, an identical
+  re-capture passes, and comparing the wrong region (whole window vs the button baseline) fails on
+  size. Deterministic diff holds on real WebView2 pixels.
+- **`assert_not_occluded` / `assert_visible`: honestly ABSTAIN.** `touchpoint.element_at` proved
+  unreliable here: hit-testing the button centre returned a node from another Chromium process whose
+  bounds *did not contain the queried point* (a coordinate/DPI mismatch), and when it does land it
+  resolves to an enclosing DOM wrapper indistinguishable from a real overlay by geometry (IDs churn
+  across reads). `assert_not_occluded` was hardened to **detect both and abstain** — never false-fail,
+  never false-pass. The one thing it still asserts hard is the unambiguous, high-value case: a
+  *foreign-process* window painted over the element. Robust same-window/web occlusion (DPI-correct
+  hit-test or a CDP DOM z-order query) is tracked in **#40** (and overlaps the CDP work in #37).
+
+The dogfood did its job: it drove a real fix (occlusion trust guard) and mapped exactly where the
+pixel/geometry path is reliable vs. where it must abstain — the safety property holding rather than a
+tool that lies on the hard case.
 
 ## Open questions
 

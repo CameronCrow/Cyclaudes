@@ -212,6 +212,12 @@ def _contains(outer, inner, tol: int) -> bool:
     )
 
 
+def _point_in(rect, x: int, y: int) -> bool:
+    """Whether screen point ``(x, y)`` falls inside ``rect`` (x, y, w, h)."""
+    rx, ry, rw, rh = rect
+    return rx <= x <= rx + rw and ry <= y <= ry + rh
+
+
 # ---------------------------------------------------------------------------
 # Capture
 # ---------------------------------------------------------------------------
@@ -361,22 +367,42 @@ def assert_not_occluded(
     """Assert nothing is painted on top of an element's centre (a hit-test).
 
     The structural gap: the tree reports an element present and enabled while a
-    modal, an overlay, a tooltip, or another window covers it — so a user (or a
-    click) can't actually reach it. Reads the element's rect, hit-tests its
-    centre with ``touchpoint.element_at``, and checks the topmost thing there is
-    the element itself or something inside its own box (a child). Anything else
-    on top → occluded.
+    modal, an overlay, a tooltip, or another **window** covers it — so a user
+    (or a click) can't actually reach it. Reads the element's rect, hit-tests
+    its centre with ``touchpoint.element_at``, and classifies what is topmost.
 
-    ponytail: centre-point hit-test with a geometric child check — a modal or a
-    foreign window over the centre is caught; a partial-edge overlap that spares
-    the centre is not. Upgrade to multi-point sampling if edge occlusion matters.
+    What it reliably decides, and how — established by the 2026-07-23 LLT
+    (WebView2, high-DPI) dogfood, which showed ``element_at`` is far less
+    trustworthy than it looks on embedded-web/high-DPI surfaces:
 
-    Abstains (:class:`GeometryUnavailable`) if the element has no measurable rect
-    or the hit-test lands on nothing.
+    1. **Trust guard.** ``element_at`` is supposed to return the element *at*
+       the point, but on the WebView2 dogfood it returned a node from another
+       Chromium process whose bounds did **not** even contain the queried point
+       (a coordinate/DPI mismatch). So if the hit's rect does not contain the
+       centre, the hit-test is untrustworthy here → **abstain**, never decide.
+    2. **Topmost is our element or a child inside it** → not occluded (the
+       healthy case). Decided by geometry, since element IDs churn across
+       touchpoint reads and can't be chained.
+    3. **Topmost belongs to a process we do not own** (and really is on the
+       point) → **occluded**, fail loudly. This is the high-value, unambiguous
+       case: another app's window or an OS dialog drawn over ours — exactly what
+       structural verification cannot see.
+    4. **Topmost is an owned/same-process node that isn't inside our element**
+       (a wrapper, a CDP-namespace node, a same-app overlay) → **abstain**. On a
+       nested DOM this is usually a benign container, but it is indistinguishable
+       *by geometry alone* from a real same-window overlay, so abstaining is the
+       only choice that neither false-fails nor false-passes.
+
+    ponytail: single centre-point hit-test; partial-edge occlusion that spares
+    the centre isn't caught, and same-process/DOM overlays abstain rather than
+    fail. A CDP/DOM z-order query (issue #37) is the robust upgrade for
+    same-window web overlays; multi-point sampling for edge occlusion. The one
+    thing it asserts hard — a *foreign process* painted over the element — is the
+    part that's actually reliable.
 
     Raises:
-        UIAssertionError: something else is on top of the element (an observed defect).
-        GeometryUnavailable | WindowGone: cannot measure / hit-test (abstention).
+        UIAssertionError: a foreign-process window is on top of the element (an observed defect).
+        GeometryUnavailable | WindowGone: cannot measure / trust the hit-test / decide (abstention).
         UnownedWindow: the handle's PID is no longer owned (safety error).
     """
     el = handle._resolve(query, role=role)  # fresh resolve; re-checks ownership
@@ -396,18 +422,45 @@ def assert_not_occluded(
             f"{query!r} (app={handle.app!r}) returned nothing. Cannot decide "
             f"occlusion — abstaining, not passing."
         )
+
+    # (1) Trust guard: a trustworthy hit-test returns an element whose bounds
+    # contain the queried point. On WebView2/high-DPI it can return an unrelated
+    # node whose rect is nowhere near the point (observed live) — don't trust it.
     hit_rect = _rect(hit)
-    same_window = getattr(hit, "window_id", None) == getattr(el, "window_id", None)
-    is_self_or_child = getattr(hit, "id", None) == el.id or (
-        same_window and hit_rect is not None and _contains(el_rect, hit_rect, 0)
-    )
-    if not is_self_or_child:
+    if hit_rect is None or not _point_in(hit_rect, cx, cy):
+        raise GeometryUnavailable(
+            f"assert_not_occluded: the hit-test for {query!r} (app={handle.app!r}) "
+            f"at ({cx}, {cy}) returned {_ui._describe_element(hit)} whose bounds "
+            f"{hit_rect} do not contain that point — the hit-test is unreliable "
+            f"here (a coordinate/DPI mismatch, as seen on WebView2). Cannot decide "
+            f"occlusion; abstaining, not passing."
+        )
+
+    # (2) Our element or a child inside it is topmost -> not occluded.
+    if getattr(hit, "id", None) == el.id or _contains(el_rect, hit_rect, 0):
+        return
+
+    # (3) A process we don't own is painted on the point -> real occlusion.
+    hit_pid = getattr(hit, "pid", None)
+    if hit_pid is not None and not _ui.is_owned(hit_pid):
         raise _ui.UIAssertionError(
             f"assert_not_occluded: {query!r} (app={handle.app!r}) is covered at "
-            f"its centre ({cx}, {cy}) by {_ui._describe_element(hit)} "
-            f"(pid={getattr(hit, 'pid', '?')}, rect={hit_rect}). The tree reports "
-            f"{query!r} present, but something is painted on top of it."
+            f"its centre ({cx}, {cy}) by another process's window "
+            f"{_ui._describe_element(hit)} (pid={hit_pid}, not owned by this run, "
+            f"rect={hit_rect}). Something is drawn on top of it."
         )
+
+    # (4) Owned/same-process node that isn't inside our element: a wrapper, a
+    # CDP-namespace node, or a same-app overlay — undecidable by geometry with
+    # churning IDs. Abstain rather than false-fail or false-pass. (#37.)
+    raise GeometryUnavailable(
+        f"assert_not_occluded: the centre hit-test for {query!r} "
+        f"(app={handle.app!r}) resolved to an owned/same-process element that "
+        f"isn't inside it: {_ui._describe_element(hit)} (rect={hit_rect}). On a "
+        f"nested DOM this is usually a wrapper, not a real overlay, but the two "
+        f"can't be told apart by geometry — abstaining, not passing. (A DOM "
+        f"z-order query, issue #37, is the robust check for same-window overlays.)"
+    )
 
 
 def assert_matches_baseline(

@@ -247,12 +247,13 @@ def test_not_occluded_passes_when_hit_is_self(owned_handle):
 
 
 def test_not_occluded_passes_when_hit_is_child(owned_handle):
-    el = FakeElement("e1", "Btn", position=(100, 100), size=(50, 20))
-    child = FakeElement("e2", "label", position=(110, 105), size=(10, 10), window_id="w1")
+    el = FakeElement("e1", "Btn", position=(100, 100), size=(50, 20))  # centre (125,110)
+    child = FakeElement("e2", "label", position=(115, 102), size=(20, 16), window_id="w1")
     vision.assert_not_occluded(owned_handle(FakeTP(elements=[el], hit=child)), "Btn")
 
 
-def test_not_occluded_fails_when_covered_by_foreign_element(owned_handle):
+def test_not_occluded_fails_when_covered_by_foreign_process(owned_handle):
+    # The reliable hard case: another (unowned) process is painted on the point.
     el = FakeElement("e1", "Btn", position=(100, 100), size=(50, 20))
     overlay = FakeElement(
         "m1", "Modal", position=(0, 0), size=(800, 600), window_id="w2", pid=9999
@@ -265,6 +266,25 @@ def test_not_occluded_abstains_when_hittest_empty(owned_handle):
     el = FakeElement("e1", "Btn")
     with pytest.raises(vision.GeometryUnavailable):
         vision.assert_not_occluded(owned_handle(FakeTP(elements=[el], hit=None)), "Btn")
+
+
+def test_not_occluded_abstains_when_hit_misses_the_point(owned_handle):
+    # The LLT/WebView2 finding: element_at returned a node whose bounds don't
+    # contain the queried point (coordinate/DPI mismatch). Untrustworthy -> abstain.
+    el = FakeElement("e1", "Btn", position=(100, 100), size=(50, 20))  # centre (125,110)
+    stray = FakeElement("g1", "", role="group", position=(900, 900), size=(50, 50), pid=9999)
+    with pytest.raises(vision.GeometryUnavailable):
+        vision.assert_not_occluded(owned_handle(FakeTP(elements=[el], hit=stray)), "Btn")
+
+
+def test_not_occluded_abstains_on_owned_enclosing_wrapper(owned_handle):
+    # An owned/same-process node that encloses the button (a DOM wrapper) and
+    # really is on the point: benign-wrapper vs real-overlay is undecidable by
+    # geometry -> abstain, never false-fail or false-pass.
+    el = FakeElement("e1", "Btn", position=(100, 100), size=(50, 20))  # centre (125,110)
+    wrapper = FakeElement("g1", "", role="group", position=(0, 0), size=(800, 600), window_id="w1")
+    with pytest.raises(vision.GeometryUnavailable):
+        vision.assert_not_occluded(owned_handle(FakeTP(elements=[el], hit=wrapper)), "Btn")
 
 
 # ---------------------------------------------------------------------------
@@ -332,8 +352,8 @@ def test_assert_visible_passes_when_all_hold(owned_handle):
 
 def test_assert_visible_short_circuits_on_occlusion(owned_handle):
     el = FakeElement("e1", "Btn", position=(100, 100), size=(50, 20))
-    overlay = FakeElement("m1", "Modal", position=(0, 0), size=(800, 600), window_id="w2")
-    # Present + within viewport, but occluded -> fails before the capture step.
+    overlay = FakeElement("m1", "Modal", position=(0, 0), size=(800, 600), window_id="w2", pid=9999)
+    # Present + within viewport, but a foreign window is on top -> fails before capture.
     tp = FakeTP(image=_painted(), elements=[el], hit=overlay)
     with pytest.raises(ui.UIAssertionError):
         vision.assert_visible(owned_handle(tp), "Btn")

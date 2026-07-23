@@ -100,12 +100,18 @@ def test_structural_passes_but_region_is_blank(handle_for):
 
 
 def test_structural_passes_but_element_is_occluded(handle_for):
-    """Present and enabled, but a modal covers it. Structural: pass. Vision: fail."""
-    el = FakeElement("e1", "Save", position=(100, 100), size=(50, 20))
-    modal = FakeElement("m1", "Overwrite?", position=(0, 0), size=(800, 600), window_id="w2")
+    """Present and enabled, but another window covers it. Structural: pass. Vision: fail.
+
+    The reliably-catchable occlusion is a *foreign process* painted over our
+    element (an OS dialog, another app) — exactly what structural can't see.
+    """
+    el = FakeElement("e1", "Save", position=(100, 100), size=(50, 20))  # centre (125,110)
+    modal = FakeElement(
+        "m1", "Overwrite?", position=(0, 0), size=(800, 600), window_id="w2", pid=9999
+    )
     h = handle_for(FakeTP(elements=[el], hit=modal))
     h.assert_exists("Save")  # structural is happy
-    with pytest.raises(ui.UIAssertionError):  # vision sees the modal on top
+    with pytest.raises(ui.UIAssertionError):  # vision sees the foreign window on top
         vision.assert_not_occluded(h, "Save")
 
 

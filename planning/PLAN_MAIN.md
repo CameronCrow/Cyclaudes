@@ -160,9 +160,13 @@ assertion deterministic (no model — model judgment stays deferred): region-sco
 / geometry / baseline that can't be evaluated abstain via `VisionAbstention` subclasses wired into the
 abstention seam — never a false pass. Proven by `tests/test_vision.py` + the `tests/test_acceptance_phase4.py`
 success-criterion suite (structural passes while vision catches blank/occluded/clipped; a good layout
-passes; ambiguous capture abstains). Remaining: a live LLT dogfood as field confirmation, and the
-model-judgment path (deferred by design). Next core work is Phase 5 (macOS) and the tracked
-limitations (#36 enumeration, #37 React).
+passes; ambiguous capture abstains). **Live-dogfooded on the real LLT Import UI (WebView2, 2026-07-23)**
+— capture, `assert_rendered`, `assert_within_viewport`, and the full `assert_matches_baseline` cycle all
+work on real WebView2 pixels; `assert_not_occluded`/`assert_visible` honestly **abstain** there because
+`touchpoint.element_at` is coordinate/DPI-unreliable on WebView2 (hardened with a trust guard — never a
+false pass/fail; foreign-process occlusion is still caught). See PHASE_4 "Live dogfood". Remaining: the
+model-judgment path (deferred by design) and robust web occlusion (#40). Next core work is Phase 5 (macOS)
+and the tracked limitations (#36 enumeration done, #37 React, #40 occlusion).
 
 ### Known limitations (tracked)
 
