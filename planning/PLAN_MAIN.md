@@ -145,8 +145,9 @@ UI-affecting edits, a `Stop` hook blocks completion until verification has run (
 satisfies the gate; fail re-blocks with the diff; abstain escalates rather than thrashing). Trigger
 points were confirmed against the Claude Code hooks contract. Decomposed into issues **A** (relevance
 detector + session state), **B** (Stop-gate + routing + retry + instrumentation), and **C** (end-to-end
-acceptance, deferred until A+B land); A and B build in parallel against a frozen state/decision
-interface. Open issue #20 (migrate the stale Phase-1 live check off tabbed Notepad → mspaint) is
+acceptance, deferred until A+B land — now landed: `tests/test_acceptance_phase3.py` proves one full
+unattended cycle plus the non-UI, abstain-never-thrashes, and fail/bounded-retry guards); A and B
+build in parallel against a frozen state/decision interface. Open issue #20 (migrate the stale Phase-1 live check off tabbed Notepad → mspaint) is
 unrelated cleanup.
 
 ### Phase 4 BUILT (2026-07-23)
