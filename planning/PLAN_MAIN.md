@@ -6,7 +6,7 @@ up: "[[Cyclaudes]]"
 # Planning
 
 **Status:** Phases 1 & 2 built, green, and dogfooded on a real project (LLT, 2026-07-22); Phase 3
-(autonomous trigger) A+B landed; **Phase 4 (vision fallback) underway (2026-07-23).** See Current
+(autonomous trigger) A+B landed; **Phase 4 (vision fallback) built (2026-07-23).** See Current
 State below.
 
 ## Problem
@@ -149,16 +149,20 @@ acceptance, deferred until A+B land); A and B build in parallel against a frozen
 interface. Open issue #20 (migrate the stale Phase-1 live check off tabbed Notepad → mspaint) is
 unrelated cleanup.
 
-### Phase 4 underway (2026-07-23)
+### Phase 4 BUILT (2026-07-23)
 
-Phases 3-A and 3-B have landed (PRs #34/#35), so **Phase 4 (vision fallback) is now underway.**
-First slice merged into the working tree: `src/cyclaudes/vision.py` — disciplined region-scoped
-capture (`capture()` over `touchpoint.screenshot`, owned-only, abstains via `CaptureUnavailable`
-when pixels can't be had) plus the first deterministic assertion `assert_rendered` (catches a region
-the tree reports present but that painted blank/white — a real defect class structural checks pass
-silently). No model, no baseline — deliberately sidesteps Phase 4's two open questions (baseline
-churn, model judgment). `assert_not_occluded` / `assert_within_viewport`, baseline diff, and the
-structural→vision routing rule are the remaining Phase-4 work.
+Phases 3-A and 3-B landed (PRs #34/#35), so Phase 4 (vision fallback) followed — and is now **built**
+in `src/cyclaudes/vision.py` (see `planning/PHASE_4.md` Status). All four deliverables, every
+assertion deterministic (no model — model judgment stays deferred): region-scoped `capture()`,
+`assert_rendered` (blank/unpainted), `assert_within_viewport` (clipped/off-screen), `assert_not_occluded`
+(hit-test), `assert_matches_baseline` (deterministic PNG diff, explicit opt-in re-baseline), and
+`assert_visible` (the structural→vision routing rule: cheap gate first, escalate on success). Capture
+/ geometry / baseline that can't be evaluated abstain via `VisionAbstention` subclasses wired into the
+abstention seam — never a false pass. Proven by `tests/test_vision.py` + the `tests/test_acceptance_phase4.py`
+success-criterion suite (structural passes while vision catches blank/occluded/clipped; a good layout
+passes; ambiguous capture abstains). Remaining: a live LLT dogfood as field confirmation, and the
+model-judgment path (deferred by design). Next core work is Phase 5 (macOS) and the tracked
+limitations (#36 enumeration, #37 React).
 
 ### Known limitations (tracked)
 

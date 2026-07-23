@@ -125,16 +125,32 @@ Tightly coupled; best done by **one agent**, not fanned out.
       the handle's fresh re-resolve, abstains (`CaptureUnavailable`, wired into
       the abstention seam) when pixels can't be had — zero-area/no-backend —
       rather than false-passing. `tests/test_vision.py`)
-- [ ] Structural-gap assertions: `assert_not_occluded`, `assert_rendered`,
-      `assert_within_viewport`
-      (`assert_rendered` landed in `vision.py` — deterministic flat/blank
-      detection via per-channel extrema span, no model/baseline; blank ⇒ fail,
-      can't-capture ⇒ abstain. `assert_not_occluded`/`assert_within_viewport`
-      still to do.)
-- [ ] Baseline capture + deterministic diff, with an explicit re-baseline step
-      *(expected to carry most of the phase's value — prefer over model judgment)*
-- [ ] Routing rule: when a check escalates from structural to vision
-- [ ] Success criterion: catches a defect structural passed; does not pass a broken layout
+- [x] Structural-gap assertions: `assert_not_occluded`, `assert_rendered`,
+      `assert_within_viewport` (all in `vision.py`, each deterministic — no
+      model): `assert_rendered` (per-channel extrema span → blank/unpainted),
+      `assert_within_viewport` (element rect ⊄ window rect → clipped/off-screen,
+      pure geometry, no capture), `assert_not_occluded` (centre hit-test via
+      `touchpoint.element_at` → something on top). Real defect ⇒ fail;
+      unmeasurable ⇒ abstain (`GeometryUnavailable`).
+- [x] Baseline capture + deterministic diff, with an explicit re-baseline step
+      (`assert_matches_baseline` in `vision.py`: capture vs stored PNG, numpy-free
+      max-channel diff → changed-pixel fraction; size change or over-tolerance ⇒
+      fail. Re-baseline is opt-in via `CYCLAUDES_REBASELINE`; a first run or a
+      re-baseline **abstains** (`BaselineUnavailable`) — a freshly written
+      baseline never counts as a pass. `tests/test_vision.py`)
+- [x] Routing rule: when a check escalates from structural to vision
+      (`assert_visible` composes the rule: cheapest structural gate first
+      (`assert_exists`) → geometry (`assert_within_viewport`) → one hit-test
+      (`assert_not_occluded`) → capture (`assert_rendered`), short-circuiting on
+      the first failure/abstention so a missing element never pays for a
+      screenshot. Documented in `vision.py`'s module docstring + verify-ui skill.)
+- [x] Success criterion: catches a defect structural passed; does not pass a broken layout
+      (`tests/test_acceptance_phase4.py`: for blank/occluded/clipped, structural
+      `assert_exists`/`assert_state` pass on the same tree while the vision
+      assertion fails; a good layout passes `assert_visible`; a capture that
+      can't be taken abstains — never passes. Deterministic, fake-driven, same
+      pattern as the Phase-2 acceptance proof; live LLT dogfood is the field
+      confirmation to run on top.)
 
 ## Phase 5 — Cross-platform (macOS) — **confirmed, ~2026-08-03**
 

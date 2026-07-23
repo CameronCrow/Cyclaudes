@@ -3,43 +3,69 @@
 The tree will happily report a button as *present and enabled* while it renders
 behind a modal, off-screen, clipped out of the viewport, or painted blank. Those
 are real defect classes structural checks pass silently (see
-``planning/PHASE_4.md``). This module is the disciplined pixel path for exactly
-those gaps — and nothing else. Structural verification stays the default; vision
-is opt-in, per assertion.
+``planning/PHASE_4.md``). This module is the disciplined pixel/geometry path for
+exactly those gaps — and nothing else. Structural verification stays the default;
+vision is opt-in, per assertion.
 
 Discipline carried over from :mod:`cyclaudes.ui`:
 
-1. **Owned-only.** Capture goes through a :class:`~cyclaudes.ui.WindowHandle`,
-   which re-checks PID ownership on every read. We never screenshot a window we
-   did not launch. A lapsed claim raises :class:`~cyclaudes.ui.UnownedWindow`
-   (a loud safety error), never an abstention.
-2. **Abstain, never false-pass.** "Could not get the pixels" (no capture backend,
-   a zero-area region, a headless host) is a *distinct abstention*
-   (:class:`CaptureUnavailable`), wired into the same abstention seam as an empty
-   tree — because "I couldn't see it" must never read as "it looks fine". Only a
-   genuinely observed defect (a region that *is* blank) fails as an assertion.
-3. **Deterministic over model judgment.** This first slice asks a single
-   pre-declared, deterministic question — "did this region paint anything, or is
-   it a flat blank?" — decided by pixel statistics, not a vision model. Per the
-   phase's key decision, model judgment is reserved for genuinely novel states
-   and defaults to abstain; it is deliberately absent here.
+1. **Owned-only.** Everything goes through a :class:`~cyclaudes.ui.WindowHandle`,
+   which re-checks PID ownership on every read. We never screenshot or hit-test a
+   window we did not launch. A lapsed claim raises
+   :class:`~cyclaudes.ui.UnownedWindow` (a loud safety error), never an abstention.
+2. **Abstain, never false-pass.** "Could not get the pixels / could not measure
+   the geometry / have no baseline yet" is a *distinct abstention*
+   (:class:`VisionAbstention` and its subclasses), wired into the same abstention
+   seam as an empty tree — because "I couldn't see it" must never read as "it
+   looks fine". Only a genuinely observed defect (a region that *is* blank, an
+   element that *is* occluded / clipped / changed) fails as an assertion.
+3. **Deterministic over model judgment.** Every assertion here answers a single
+   pre-declared, deterministic question decided by pixels or geometry — did this
+   region paint anything? is it inside its window? is something on top of it?
+   does it still match its approved baseline? — never open-ended model judgment.
+   Per the phase's key decision, model judgment is reserved for genuinely novel
+   states and defaults to abstain; it is deliberately absent here.
 
-The pixels come from ``touchpoint.screenshot`` (returns a ``PIL.Image``); this
-module's only job is the wrapper that makes the three footguns above
-unrepresentable, mirroring what :mod:`cyclaudes.ui` does for the tree.
+Routing rule (structural → vision). Structural checks stay the cheap default.
+Escalate to a vision assertion *only* for a property the tree structurally cannot
+encode (blank render, occlusion, clipping, pixel regression), and do it explicitly
+per assertion — vision is slower and costlier, so it is never the default path.
+:func:`assert_visible` is that rule made concrete: it runs the cheap structural
+gate first and only pays for each more-expensive vision check if the cheaper one
+passed.
+
+The pixels come from ``touchpoint.screenshot`` (returns a ``PIL.Image``) and the
+geometry from each element's/window's ``position``/``size`` plus
+``touchpoint.element_at`` (a hit-test); this module's only job is the wrapper that
+makes the footguns above unrepresentable, mirroring what :mod:`cyclaudes.ui` does
+for the tree.
 """
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import touchpoint as _tp  # tests replace vision._tp with a fake; keep all calls on this alias
+from PIL import Image, ImageChops
 
 from . import abstain as _abstain
 from . import ui as _ui
 
 __all__ = [
+    "DEFAULT_BASELINE_TOLERANCE",
     "DEFAULT_FLAT_TOLERANCE",
+    "DEFAULT_PER_PIXEL_TOLERANCE",
+    "REBASELINE_ENV",
+    "BaselineUnavailable",
     "CaptureUnavailable",
+    "GeometryUnavailable",
+    "VisionAbstention",
+    "assert_matches_baseline",
+    "assert_not_occluded",
     "assert_rendered",
+    "assert_visible",
+    "assert_within_viewport",
     "capture",
     "is_flat",
 ]
@@ -51,23 +77,68 @@ __all__ = [
 #: that actually rendered text, an icon, or a gradient.
 DEFAULT_FLAT_TOLERANCE = 6
 
+#: Fraction of pixels (0–1) allowed to differ from a baseline before
+#: :func:`assert_matches_baseline` fails. Small but non-zero: cursor blink,
+#: sub-pixel AA and font hinting jitter a handful of pixels between otherwise
+#: identical renders.
+DEFAULT_BASELINE_TOLERANCE = 0.005
 
-class CaptureUnavailable(_ui.UIError):
-    """The pixels for a region could not be captured — an **abstention**.
+#: A single pixel counts as "changed" only if some channel differs from the
+#: baseline by more than this (0–255). Filters imperceptible noise so it doesn't
+#: inflate the changed-pixel fraction.
+DEFAULT_PER_PIXEL_TOLERANCE = 16
 
-    Distinct from "the region is blank" (which is an ordinary assertion
-    *failure*): this means the capture itself did not happen — no screenshot
-    backend, a headless/no-display host, or a resolved region with zero area.
-    Nothing was observed, so nothing can be asserted, and "could not see" must
-    never be reported as a pass. Registered into
-    :data:`cyclaudes.ui.ABSTENTION_CONDITIONS`' seam below so the pytest layer
-    surfaces it as "cannot verify", exactly like :class:`~cyclaudes.ui.EmptyTree`.
+#: Set this env var (to anything non-empty) to *write* baselines instead of
+#: comparing against them — the explicit, opt-in re-baseline step. A run with it
+#: set never passes: it abstains, because nothing was verified.
+REBASELINE_ENV = "CYCLAUDES_REBASELINE"
+
+
+class VisionAbstention(_ui.UIError):
+    """Base for every "could not verify visually" condition — an **abstention**.
+
+    Distinct from an ordinary assertion *failure* (the region is blank / the
+    element is occluded / clipped / changed): these mean the check could not be
+    *evaluated* at all. Nothing was observed, so nothing can be asserted, and
+    "could not see" must never be reported as a pass. Every subclass is
+    registered into the abstention seam below so the pytest layer surfaces it as
+    "cannot verify", exactly like :class:`~cyclaudes.ui.EmptyTree`.
+    """
+
+
+class CaptureUnavailable(VisionAbstention):
+    """Pixels could not be captured — no screenshot backend, or a zero-area region."""
+
+
+class GeometryUnavailable(VisionAbstention):
+    """An element's/window's geometry could not be measured for a spatial check.
+
+    Missing ``position``/``size`` on the tree node, or a hit-test that landed on
+    nothing — either way there is no measurement to assert on, so it abstains
+    rather than guessing the element is fine (or broken).
+    """
+
+
+class BaselineUnavailable(VisionAbstention):
+    """No baseline to compare against — one was just written; re-run to verify.
+
+    Raised both when no baseline existed yet (a first run creates it) and when
+    :data:`REBASELINE_ENV` is set (an explicit re-baseline). Neither actually
+    verified anything, so both abstain — a freshly written baseline must never
+    be reported as a pass against itself.
     """
 
 
 # Wire the abstention seam, same pattern ui.py uses for EmptyTree/WindowGone:
-# a capture we couldn't take is "cannot verify", not "verified fine".
-_abstain.register_abstention_types(CaptureUnavailable)
+# a visual check we couldn't evaluate is "cannot verify", not "verified fine".
+_abstain.register_abstention_types(
+    CaptureUnavailable, GeometryUnavailable, BaselineUnavailable
+)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic pixel primitives
+# ---------------------------------------------------------------------------
 
 
 def _extrema_span(img) -> int:
@@ -94,6 +165,58 @@ def is_flat(img, *, tolerance: int = DEFAULT_FLAT_TOLERANCE) -> bool:
     return _extrema_span(img) <= tolerance
 
 
+def _changed_fraction(base, current, per_pixel: int) -> tuple[float, int]:
+    """Fraction of pixels that differ beyond ``per_pixel``, and the max deviation.
+
+    Deterministic and numpy-free: per-pixel max-channel difference (via
+    ``ImageChops.lighter`` folding the three channels) thresholded to a 0/255
+    mask, then counted from the histogram. Returns ``(fraction, max_deviation)``
+    over two same-size RGB images.
+    """
+    diff = ImageChops.difference(base, current)
+    r, g, b = diff.split()
+    max_channel = ImageChops.lighter(ImageChops.lighter(r, g), b)  # mode "L"
+    mask = max_channel.point(lambda p: 255 if p > per_pixel else 0)
+    changed = mask.histogram()[255]
+    total = base.width * base.height or 1
+    max_dev = max_channel.getextrema()[1]
+    return changed / total, max_dev
+
+
+# ---------------------------------------------------------------------------
+# Geometry primitives
+# ---------------------------------------------------------------------------
+
+
+def _rect(obj):
+    """``(x, y, w, h)`` for a tree node/window, or ``None`` if unmeasurable."""
+    pos = getattr(obj, "position", None)
+    size = getattr(obj, "size", None)
+    if not pos or not size:
+        return None
+    (x, y), (w, h) = pos, size
+    if w <= 0 or h <= 0:
+        return None
+    return (int(x), int(y), int(w), int(h))
+
+
+def _contains(outer, inner, tol: int) -> bool:
+    """Whether ``inner`` rect sits within ``outer`` rect, allowing ``tol`` px slack."""
+    ox, oy, ow, oh = outer
+    ix, iy, iw, ih = inner
+    return (
+        ix >= ox - tol
+        and iy >= oy - tol
+        and ix + iw <= ox + ow + tol
+        and iy + ih <= oy + oh + tol
+    )
+
+
+# ---------------------------------------------------------------------------
+# Capture
+# ---------------------------------------------------------------------------
+
+
 def capture(
     handle: "_ui.WindowHandle",
     query: str | None = None,
@@ -113,22 +236,14 @@ def capture(
     read (``_resolve`` / ``_require_window``) re-checks the PID claim and raises
     :class:`~cyclaudes.ui.UnownedWindow` if it has lapsed — a hard safety error,
     not caught here. Element resolution failures (:class:`ElementNotFound`,
-    :class:`AmbiguousElement`) propagate unchanged: "capture *that* element"
-    with no unambiguous target is a caller error, not something to guess past.
+    :class:`AmbiguousElement`) propagate unchanged.
 
     Returns a ``PIL.Image``. Raises :class:`CaptureUnavailable` (an abstention)
     if the screenshot backend yields nothing or the region has zero area —
     never a blank placeholder image that a downstream check might read as real.
-
-    Raises:
-        UnownedWindow: the handle's PID is no longer owned (safety error).
-        ElementNotFound | AmbiguousElement: ``query`` did not resolve to one element.
-        CaptureUnavailable: pixels could not be obtained (abstention).
     """
     if query is None:
-        # _require_window re-checks ownership and that the window still exists
-        # (raising WindowGone — itself an abstention — if it vanished).
-        handle._require_window()
+        handle._require_window()  # re-checks ownership + WindowGone
         img = _tp.screenshot(window_id=handle._window_id)
         scope = f"window (app={handle.app!r}, pid={handle.pid})"
     else:
@@ -152,6 +267,11 @@ def capture(
     return img
 
 
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+
 def assert_rendered(
     handle: "_ui.WindowHandle",
     query: str | None = None,
@@ -169,12 +289,7 @@ def assert_rendered(
     flat colour; passes if it varies. Deterministic — no model, no baseline.
 
     A capture that cannot be taken **abstains** (:class:`CaptureUnavailable`)
-    rather than failing: "couldn't see it" is not "it's broken". This keeps the
-    phase's safety property — a false "rendered" is worse than the stall it
-    replaces.
-
-    ``tolerance`` is the per-channel span below which the region counts as flat;
-    raise it for regions expected to be near-uniform, lower it to be stricter.
+    rather than failing: "couldn't see it" is not "it's broken".
 
     Raises:
         UIAssertionError: the region is flat/blank (an observed defect).
@@ -193,3 +308,200 @@ def assert_rendered(
             f"(white/unrendered). This is a real defect the structural check "
             f"cannot see."
         )
+
+
+def assert_within_viewport(
+    handle: "_ui.WindowHandle",
+    query: str,
+    *,
+    role: str | None = None,
+    tolerance: int = 0,
+) -> None:
+    """Assert an element's box lies within its window — not clipped/off-screen.
+
+    The structural gap: the tree reports an element present with a position,
+    but that position is partly or wholly outside the window's bounds (scrolled
+    off, clipped by an overflow container, laid out past the edge). Pure
+    geometry from the tree — no capture. Fails if the element's rect is not
+    contained in the window's rect (with ``tolerance`` px of slack for borders).
+
+    Abstains (:class:`GeometryUnavailable`) if either rect can't be measured —
+    a node without ``position``/``size`` tells us nothing, so we don't guess.
+
+    Raises:
+        UIAssertionError: the element extends outside its window (an observed defect).
+        GeometryUnavailable | WindowGone: geometry unavailable (abstention).
+        UnownedWindow: the handle's PID is no longer owned (safety error).
+    """
+    win = handle._require_window()  # re-checks ownership + WindowGone
+    el = handle._resolve(query, role=role)
+    win_rect, el_rect = _rect(win), _rect(el)
+    if win_rect is None or el_rect is None:
+        raise GeometryUnavailable(
+            f"assert_within_viewport: cannot measure geometry for {query!r} "
+            f"(element rect={el_rect}, window rect={win_rect}) in window "
+            f"(app={handle.app!r}). The tree reported no usable position/size, "
+            f"so containment can't be decided — abstaining, not passing."
+        )
+    if not _contains(win_rect, el_rect, tolerance):
+        raise _ui.UIAssertionError(
+            f"assert_within_viewport: {query!r} (app={handle.app!r}) has box "
+            f"{el_rect} which is not contained within its window {win_rect} "
+            f"(tolerance {tolerance}px). It is clipped or off-screen — present "
+            f"in the tree but not actually visible."
+        )
+
+
+def assert_not_occluded(
+    handle: "_ui.WindowHandle",
+    query: str,
+    *,
+    role: str | None = None,
+) -> None:
+    """Assert nothing is painted on top of an element's centre (a hit-test).
+
+    The structural gap: the tree reports an element present and enabled while a
+    modal, an overlay, a tooltip, or another window covers it — so a user (or a
+    click) can't actually reach it. Reads the element's rect, hit-tests its
+    centre with ``touchpoint.element_at``, and checks the topmost thing there is
+    the element itself or something inside its own box (a child). Anything else
+    on top → occluded.
+
+    ponytail: centre-point hit-test with a geometric child check — a modal or a
+    foreign window over the centre is caught; a partial-edge overlap that spares
+    the centre is not. Upgrade to multi-point sampling if edge occlusion matters.
+
+    Abstains (:class:`GeometryUnavailable`) if the element has no measurable rect
+    or the hit-test lands on nothing.
+
+    Raises:
+        UIAssertionError: something else is on top of the element (an observed defect).
+        GeometryUnavailable | WindowGone: cannot measure / hit-test (abstention).
+        UnownedWindow: the handle's PID is no longer owned (safety error).
+    """
+    el = handle._resolve(query, role=role)  # fresh resolve; re-checks ownership
+    el_rect = _rect(el)
+    if el_rect is None:
+        raise GeometryUnavailable(
+            f"assert_not_occluded: {query!r} (app={handle.app!r}) has no usable "
+            f"position/size in the tree, so its centre can't be hit-tested — "
+            f"abstaining, not passing."
+        )
+    x, y, w, h = el_rect
+    cx, cy = x + w // 2, y + h // 2
+    hit = _tp.element_at(cx, cy)
+    if hit is None:
+        raise GeometryUnavailable(
+            f"assert_not_occluded: hit-test at the centre ({cx}, {cy}) of "
+            f"{query!r} (app={handle.app!r}) returned nothing. Cannot decide "
+            f"occlusion — abstaining, not passing."
+        )
+    hit_rect = _rect(hit)
+    same_window = getattr(hit, "window_id", None) == getattr(el, "window_id", None)
+    is_self_or_child = getattr(hit, "id", None) == el.id or (
+        same_window and hit_rect is not None and _contains(el_rect, hit_rect, 0)
+    )
+    if not is_self_or_child:
+        raise _ui.UIAssertionError(
+            f"assert_not_occluded: {query!r} (app={handle.app!r}) is covered at "
+            f"its centre ({cx}, {cy}) by {_ui._describe_element(hit)} "
+            f"(pid={getattr(hit, 'pid', '?')}, rect={hit_rect}). The tree reports "
+            f"{query!r} present, but something is painted on top of it."
+        )
+
+
+def assert_matches_baseline(
+    handle: "_ui.WindowHandle",
+    name: str,
+    query: str | None = None,
+    *,
+    role: str | None = None,
+    padding: int = 0,
+    tolerance: float = DEFAULT_BASELINE_TOLERANCE,
+    per_pixel: int = DEFAULT_PER_PIXEL_TOLERANCE,
+    baseline_dir: str | os.PathLike | None = None,
+) -> None:
+    """Assert a region still matches its approved baseline (deterministic diff).
+
+    The most reliable vision check per the phase plan: capture the region and
+    compare pixel-for-pixel against a stored PNG baseline. Fails
+    (:class:`~cyclaudes.ui.UIAssertionError`) if the region's size changed or
+    more than ``tolerance`` (fraction) of pixels differ by more than
+    ``per_pixel`` levels; passes otherwise. No model — a diff, not a judgment.
+
+    Re-baselining is explicit and opt-in: set the :data:`REBASELINE_ENV`
+    environment variable to write the current capture as the new baseline. A
+    first run with no baseline yet also writes one. **Both cases abstain**
+    (:class:`BaselineUnavailable`) — a freshly written baseline verified nothing
+    against itself, so it must never count as a pass.
+
+    ``name`` keys the baseline file (``<baseline_dir>/<name>.png``);
+    ``baseline_dir`` defaults to ``.cyclaudes/baselines`` under the cwd.
+
+    Raises:
+        UIAssertionError: the region diverged from its baseline (an observed defect).
+        BaselineUnavailable: baseline missing or re-baselined — nothing compared (abstention).
+        CaptureUnavailable | WindowGone: could not capture (abstention).
+        UnownedWindow: the handle's PID is no longer owned (safety error).
+    """
+    current = capture(handle, query, role=role, padding=padding).convert("RGB")
+    root = Path(baseline_dir) if baseline_dir is not None else Path(".cyclaudes") / "baselines"
+    path = root / f"{name}.png"
+
+    rebaseline = bool(os.environ.get(REBASELINE_ENV))
+    if rebaseline or not path.exists():
+        root.mkdir(parents=True, exist_ok=True)
+        current.save(path)
+        why = (
+            f"{REBASELINE_ENV} is set — wrote a new baseline"
+            if rebaseline
+            else "no baseline existed — created one"
+        )
+        raise BaselineUnavailable(
+            f"assert_matches_baseline({name!r}): {why} at {path}. Nothing was "
+            f"compared, so this is an abstention, not a pass — re-run without "
+            f"{REBASELINE_ENV} to verify against the baseline."
+        )
+
+    base = Image.open(path).convert("RGB")
+    if base.size != current.size:
+        raise _ui.UIAssertionError(
+            f"assert_matches_baseline({name!r}, app={handle.app!r}): region size "
+            f"changed from baseline {base.size} to {current.size}. The layout "
+            f"moved or resized — a real visual regression against {path}."
+        )
+    frac, max_dev = _changed_fraction(base, current, per_pixel)
+    if frac > tolerance:
+        raise _ui.UIAssertionError(
+            f"assert_matches_baseline({name!r}, app={handle.app!r}): "
+            f"{frac:.4f} of pixels differ from baseline {path} (>{tolerance:.4f} "
+            f"allowed; max channel deviation {max_dev}). A visual regression the "
+            f"structural check cannot see. Re-baseline with {REBASELINE_ENV}=1 "
+            f"only if this change is intended."
+        )
+
+
+def assert_visible(
+    handle: "_ui.WindowHandle",
+    query: str,
+    *,
+    role: str | None = None,
+) -> None:
+    """Assert an element is actually usable — present, on-screen, unobscured, painted.
+
+    The routing rule made concrete: run the cheapest structural gate first and
+    only escalate to each more-expensive vision check if the cheaper one passed.
+    Order is deliberate — structural existence (cheap tree read) → within
+    viewport (geometry, no capture) → not occluded (one hit-test) → rendered
+    (a capture). The first failure/abstention short-circuits, so a missing
+    element never pays for a screenshot.
+
+    Each step keeps its own semantics: a real defect at any step fails, an
+    unevaluable step abstains, a lapsed ownership claim raises. This is the
+    single call a check reaches for when it means "is this thing genuinely
+    visible to a user", not just "is it in the tree".
+    """
+    handle.assert_exists(query, role=role)  # structural, cheapest
+    assert_within_viewport(handle, query, role=role)  # geometry, no capture
+    assert_not_occluded(handle, query, role=role)  # one hit-test
+    assert_rendered(handle, query, role=role)  # capture, most expensive

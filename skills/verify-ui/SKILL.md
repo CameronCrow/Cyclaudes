@@ -93,6 +93,20 @@ A map, not a substitute — read the real signatures and docstrings in `src/cycl
 - **`ui.reset_to_known_state(handle, reset)`** — run your app-specific `reset(handle)` callable, then wait until ready, so one check's leftovers can't bleed into the next.
 - **`WindowHandle`** — all reads/asserts re-read the live tree: reads `exists`, `read_text`, `states`, `title`; assertions `assert_text`, `assert_state`, `assert_not_state`, `assert_exists`, `assert_gone`; actions `click`, `set_value`, `close` (each re-verifies from a fresh snapshot — never trust the action's own return value, rule 1). Elements are addressed by **name/role**, never by cached IDs (rule 2).
 
+#### When the tree can't see it — `cyclaudes.vision` (Phase 4, opt-in)
+
+The a11y tree reports an element *present and enabled* while it renders blank, behind a modal, or
+clipped off-screen — defect classes structural checks pass silently. Reach for a vision assertion
+**only for a property the tree structurally can't encode**, per assertion (it's slower — never the
+default). All owned-only and deterministic (no model); each abstains (a `VisionAbstention`, honoured
+like `CannotVerify`) when it can't see/measure, fails only on an observed defect:
+
+- **`vision.assert_rendered(handle, query=None)`** — the region actually painted content, not a flat blank/white fill.
+- **`vision.assert_within_viewport(handle, query)`** — the element's box lies inside its window (not clipped/off-screen). Pure geometry, no capture.
+- **`vision.assert_not_occluded(handle, query)`** — nothing is painted on top of the element's centre (a hit-test).
+- **`vision.assert_matches_baseline(handle, name, query=None)`** — the region still matches its approved PNG baseline (deterministic diff). Re-baseline explicitly with `CYCLAUDES_REBASELINE=1`; a first run or re-baseline **abstains** (never passes against a just-written baseline).
+- **`vision.assert_visible(handle, query)`** — the routing rule in one call: present → on-screen → unobscured → painted, cheap structural gate first, escalating only on success.
+
 #### A worked check, end to end
 
 The launch → warm → assert → automatic-teardown flow (this is the real LLT Import UI run, a

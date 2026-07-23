@@ -52,6 +52,36 @@ cheap — vision is slower and costlier, and defaulting to it would undo Phase 1
 3. Abstains rather than guessing when the capture is ambiguous.
 4. Structural-only checks are not slowed down — vision stays opt-in per assertion.
 
+## Status — BUILT (2026-07-23)
+
+Shipped in `src/cyclaudes/vision.py` (tests: `tests/test_vision.py`, acceptance:
+`tests/test_acceptance_phase4.py`). All four deliverables, every assertion deterministic (no model —
+model judgment stays deferred per the key decision):
+
+- **Region-scoped capture** — `capture(handle, query=None, padding=)` over `touchpoint.screenshot`;
+  owned-only via the handle's fresh re-resolve; `CaptureUnavailable` (abstention) when pixels can't
+  be had (no backend, zero-area region), never a placeholder image.
+- **Structural-gap assertions** — `assert_rendered` (per-channel extrema span → blank/unpainted),
+  `assert_within_viewport` (element rect ⊄ window rect → clipped/off-screen, pure geometry),
+  `assert_not_occluded` (centre hit-test via `touchpoint.element_at` → something on top).
+- **Baseline diff** — `assert_matches_baseline(name)`: capture vs stored PNG, numpy-free max-channel
+  diff → changed-pixel fraction; size-change or over-tolerance fails. Explicit opt-in re-baseline via
+  `CYCLAUDES_REBASELINE`; a first run or re-baseline **abstains** (`BaselineUnavailable`) so a freshly
+  written baseline never passes against itself. This carries most of the phase's value, as predicted.
+- **Routing rule** — `assert_visible` runs the cheap structural gate first and escalates to each
+  costlier vision check only on success (`assert_exists` → viewport → occlusion → rendered),
+  short-circuiting so a missing element never pays for a screenshot. Vision stays opt-in per
+  assertion (criterion 4); a check reaches for a vision assertion only for a property the tree
+  structurally can't encode.
+
+Abstention discipline holds throughout: `CaptureUnavailable` / `GeometryUnavailable` /
+`BaselineUnavailable` all subclass `VisionAbstention` and are wired into the abstention seam, so
+"couldn't see / couldn't measure / no baseline yet" surfaces as cannot-verify — never a false pass
+(criterion 3). The open questions (deterministic-vs-model, baseline churn, settle-before-capture) are
+answered conservatively: deterministic only, re-baseline explicit, and capture reads the current tree
+fresh each call. A live LLT dogfood is the remaining field confirmation on top of the deterministic
+acceptance suite.
+
 ## Open questions
 
 - How much to lean on deterministic diff vs model judgment. Current lean: deterministic wherever a
