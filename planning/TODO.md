@@ -115,7 +115,18 @@ Tightly coupled; best done by **one agent**, not fanned out.
 - [x] Loop integration: pass → continue; fail → actionable diff + self-correct; abstain →
       escalate with specifics
 - [x] Bounded retry — cap correct→verify cycles, escalate on exhaustion
-- [ ] Success criterion: a full issue resolution completes with zero Cameron input
+- [x] Success criterion: a full issue resolution completes with zero Cameron input
+      (`tests/test_acceptance_phase3.py` — the cohesive Phase-3 acceptance proof, driving the
+      three real cores wired as Claude Code runs them: PostToolUse `flag_ui_change.flag` →
+      `verify_result.write_result` (the `cyclaudes verify` writer) → Stop `stop_gate.decide`.
+      Proves one full unattended cycle (edit → flag → block → pass → allow), the self-correct
+      loop (fail → block with the expected-vs-actual diff → fix → re-verify pass → allow), and
+      the three guards: a **non-UI** edit never flags and the gate never blocks (criterion 4);
+      an **abstain** allows-and-escalates and provably never consumes the block budget — 12
+      re-entries stay `block_count == 0`, tallied once, so it can't thrash into the 8-block cap
+      and false-pass (criterion 2, the load-bearing rule); and a **fail** blocks with the diff
+      then the bounded retry caps and escalates on exhaustion. Deterministic/fake-driven, green
+      under default `python -m pytest`; live LLT dogfood is the field confirmation to run on top.)
 
 ## Phase 4 — Vision fallback → Phase 3
 
