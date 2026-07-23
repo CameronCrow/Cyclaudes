@@ -5,8 +5,9 @@ up: "[[Cyclaudes]]"
 ---
 # Planning
 
-**Status:** Phases 1 & 2 built and green (2026-07-22); not yet dogfooded on a real project — that
-validation is the current priority. See Current State below.
+**Status:** Phases 1 & 2 built, green, and dogfooded on a real project (LLT, 2026-07-22); Phase 3
+(autonomous trigger) A+B landed; **Phase 4 (vision fallback) underway (2026-07-23).** See Current
+State below.
 
 ## Problem
 
@@ -147,6 +148,31 @@ detector + session state), **B** (Stop-gate + routing + retry + instrumentation)
 acceptance, deferred until A+B land); A and B build in parallel against a frozen state/decision
 interface. Open issue #20 (migrate the stale Phase-1 live check off tabbed Notepad → mspaint) is
 unrelated cleanup.
+
+### Phase 4 underway (2026-07-23)
+
+Phases 3-A and 3-B have landed (PRs #34/#35), so **Phase 4 (vision fallback) is now underway.**
+First slice merged into the working tree: `src/cyclaudes/vision.py` — disciplined region-scoped
+capture (`capture()` over `touchpoint.screenshot`, owned-only, abstains via `CaptureUnavailable`
+when pixels can't be had) plus the first deterministic assertion `assert_rendered` (catches a region
+the tree reports present but that painted blank/white — a real defect class structural checks pass
+silently). No model, no baseline — deliberately sidesteps Phase 4's two open questions (baseline
+churn, model judgment). `assert_not_occluded` / `assert_within_viewport`, baseline diff, and the
+structural→vision routing rule are the remaining Phase-4 work.
+
+### Known limitations (tracked)
+
+- **React / div-soup apps expose thin accessibility trees (#37).** Structural verification only sees
+  what an app puts in its a11y tree; role-sparse React UIs give little to assert on even though they
+  render fine. React is one of the most popular stacks, so making the tool robust to it is a priority.
+  Lead: touchpoint already carries a CDP seam (`_get_cdp`/`_is_cdp_id`) that reads the real DOM, not
+  just the a11y projection — a candidate path for Chromium/Electron/WebView2 targets. Must abstain,
+  never false-pass, on a UI it can't actually read.
+- **First window resolution still pays a full enumeration (#36).** `touchpoint.windows()` is ~8s on a
+  busy desktop (~30s with a UI-thread-blocked app like Logix Designer). A 2026-07-23 read-only
+  investigation found two low-risk wins: a ctypes `IsWindow`/`GetWindowThreadProcessId` liveness check
+  (the HWND touchpoint computes is currently discarded), and a ctypes `EnumWindows` gate on the
+  `app_session` launch-wait loop so it stops paying repeated enumerations every poll.
 
 ### The two live-UI findings — RESOLVED (2026-07-20)
 

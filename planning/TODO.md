@@ -119,9 +119,18 @@ Tightly coupled; best done by **one agent**, not fanned out.
 
 ## Phase 4 — Vision fallback → Phase 3
 
-- [ ] Region-scoped capture (element bounding box, not whole desktop)
+- [x] Region-scoped capture (element bounding box, not whole desktop)
+      (`src/cyclaudes/vision.py`: `capture(handle, query=None, padding=…)` over
+      `touchpoint.screenshot(element=/window_id=)` → `PIL.Image`; owned-only via
+      the handle's fresh re-resolve, abstains (`CaptureUnavailable`, wired into
+      the abstention seam) when pixels can't be had — zero-area/no-backend —
+      rather than false-passing. `tests/test_vision.py`)
 - [ ] Structural-gap assertions: `assert_not_occluded`, `assert_rendered`,
       `assert_within_viewport`
+      (`assert_rendered` landed in `vision.py` — deterministic flat/blank
+      detection via per-channel extrema span, no model/baseline; blank ⇒ fail,
+      can't-capture ⇒ abstain. `assert_not_occluded`/`assert_within_viewport`
+      still to do.)
 - [ ] Baseline capture + deterministic diff, with an explicit re-baseline step
       *(expected to carry most of the phase's value — prefer over model judgment)*
 - [ ] Routing rule: when a check escalates from structural to vision
