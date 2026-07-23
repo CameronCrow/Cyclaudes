@@ -395,10 +395,19 @@ def assert_not_occluded(
 
     ponytail: single centre-point hit-test; partial-edge occlusion that spares
     the centre isn't caught, and same-process/DOM overlays abstain rather than
-    fail. A CDP/DOM z-order query (issue #37) is the robust upgrade for
-    same-window web overlays; multi-point sampling for edge occlusion. The one
-    thing it asserts hard — a *foreign process* painted over the element — is the
-    part that's actually reliable.
+    fail. A CDP/DOM z-order query is the robust upgrade for same-window web
+    overlays; multi-point sampling for edge occlusion. The one thing it asserts
+    hard — a *foreign process* painted over the element — is the part that's
+    actually reliable.
+
+    Note (issue #40): a 2026-07-23 live spike established that reliable DOM-level
+    occlusion on WebView2/Chromium is **not** achievable with touchpoint's
+    current API — ``element_at``'s CDP routing breaks on WebView2's multi-process
+    compositor, ``cdp.get_element_at`` returns only a coarse enclosing container,
+    and the DOM hierarchy (parent/child) needed to classify that container comes
+    back flattened. So abstaining here is the validated-correct behaviour, and
+    the real fix is an upstream touchpoint primitive (page-level
+    ``elementFromPoint`` / fixed CDP hit-test routing). See issue #40.
 
     Raises:
         UIAssertionError: a foreign-process window is on top of the element (an observed defect).
@@ -458,8 +467,9 @@ def assert_not_occluded(
         f"(app={handle.app!r}) resolved to an owned/same-process element that "
         f"isn't inside it: {_ui._describe_element(hit)} (rect={hit_rect}). On a "
         f"nested DOM this is usually a wrapper, not a real overlay, but the two "
-        f"can't be told apart by geometry — abstaining, not passing. (A DOM "
-        f"z-order query, issue #37, is the robust check for same-window overlays.)"
+        f"can't be told apart by geometry — abstaining, not passing. (Reliable "
+        f"web occlusion needs an upstream touchpoint DOM z-order primitive; see "
+        f"issue #40.)"
     )
 
 

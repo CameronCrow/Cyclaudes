@@ -167,8 +167,10 @@ passes; ambiguous capture abstains). **Live-dogfooded on the real LLT Import UI 
 work on real WebView2 pixels; `assert_not_occluded`/`assert_visible` honestly **abstain** there because
 `touchpoint.element_at` is coordinate/DPI-unreliable on WebView2 (hardened with a trust guard — never a
 false pass/fail; foreign-process occlusion is still caught). See PHASE_4 "Live dogfood". Remaining: the
-model-judgment path (deferred by design) and robust web occlusion (#40). Next core work is Phase 5 (macOS)
-and the tracked limitations (#36 enumeration done, #37 React, #40 occlusion).
+model-judgment path (deferred by design) and robust web occlusion (#40 — **investigated 2026-07-23,
+blocked on an upstream touchpoint DOM z-order primitive; the abstain is validated-correct**). Next core
+work is Phase 5 (macOS) and the tracked limitations (#36 enumeration done, #37 React DOM reads —
+confirmed working live, #40 occlusion — blocked upstream).
 
 ### Known limitations (tracked)
 

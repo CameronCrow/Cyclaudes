@@ -101,7 +101,19 @@ the hardest surface class; occlusion abstains honestly.**
   across reads). `assert_not_occluded` was hardened to **detect both and abstain** — never false-fail,
   never false-pass. The one thing it still asserts hard is the unambiguous, high-value case: a
   *foreign-process* window painted over the element. Robust same-window/web occlusion (DPI-correct
-  hit-test or a CDP DOM z-order query) is tracked in **#40** (and overlaps the CDP work in #37).
+  hit-test or a CDP DOM z-order query) is tracked in **#40**.
+
+**#40 investigated (2026-07-23) — blocked on upstream touchpoint.** A live spike (LLT, launched with
+remote debugging) proved reliable DOM-level occlusion is *not* achievable with touchpoint's current
+API: `element_at`'s CDP routing breaks on WebView2's multi-process compositor; `cdp.get_element_at`
+is coordinate-correct but returns only a coarse enclosing container, not the leaf; and the DOM
+hierarchy needed to classify that container (parent_id / `tree=True` children) comes back flattened,
+so ancestry is unknowable; `_topmost_pid_at` can't safely hard-fail because WebView2 shared-runtime
+PIDs aren't reliably owned. Conclusion: the current **abstain is validated-correct**, and full
+closure needs an upstream primitive (page-level `elementFromPoint` or fixed CDP hit-test routing).
+Full evidence in issue #40. **Byproduct:** the spike confirmed `read_dom_text` (#37) works **live**
+against the real DOM once the app is launched with remote debugging — closing that slice's
+live-validation gap — and identified launching the CDP page window as the concrete next capability.
 
 The dogfood did its job: it drove a real fix (occlusion trust guard) and mapped exactly where the
 pixel/geometry path is reliable vs. where it must abstain — the safety property holding rather than a
